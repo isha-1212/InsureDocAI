@@ -1,0 +1,154 @@
+# ==================== MediClaim System .gitignore ====================
+
+# ======================== EXCLUDE ML FOLDER ========================
+ML/
+*.ml
+*.model
+*.pkl
+*.h5
+*.onnx
+
+# ======================== PYTHON/DJANGO BACKEND ========================
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+static/
+.coverage
+.coverage.*
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Django migrations (optional - uncomment if you want to ignore)
+# */migrations/*.py
+# */migrations/*.pyc
+# !*/migrations/__init__.py
+
+# ======================== NODE.JS/REACT FRONTEND ========================
+# Dependencies
+frontend/client/node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Production builds
+frontend/client/dist/
+frontend/client/build/
+frontend/dist/
+frontend/build/
+
+# Environment files
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+frontend/client/.env*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Package manager files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# TypeScript
+*.tsbuildinfo
+
+# Next.js (if used)
+.next/
+out/
+
+# Vite
+frontend/client/dist-ssr/
+frontend/client/*.local
+
+# Testing
+coverage/
+*.lcov
+.nyc_output
+
+# Temporary files
+*.tmp
+*.temp
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Docker
+*.tar
+docker-compose.override.yml
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Cache directories
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Documentation
+docs/_build/
