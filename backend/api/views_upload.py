@@ -1,15 +1,15 @@
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import serializers, status
 from django.db import IntegrityError
-from api.supabase_client import upload_to_policies_bucket, upload_to_bucket, create_signed_url, get_public_url
-from api.models import Policy, FamilyMember
+from api.supabase_client import upload_to_policies_bucket, upload_to_bucket, create_signed_url
+from api.models import Policy, PolicyEvent, FamilyMember
 from api.models_document import PolicyDocument
+from api.policy_validation import validate_policy_payload
 from api.serializers import DocumentUploadSerializer, PolicyDocumentSerializer
 from users.models import User
 import uuid
-from datetime import datetime
 
 
 @api_view(['POST'])
@@ -98,14 +98,20 @@ def upload_policy_document(request):
                 {'error': 'You already have a policy registered'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        validated_policy = validate_policy_payload(
+            policy_number=policy_number,
+            start_date_value=start_date,
+            end_date_value=end_date,
+        )
         
         # Check if policy number already exists
-        existing_policy = Policy.objects.filter(policy_number=policy_number).first()
+        existing_policy = Policy.objects.filter(policy_number=validated_policy['policy_number']).first()
         if existing_policy:
             return Response(
                 {
                     'error': 'Policy number already exists',
-                    'detail': f'A policy with number {policy_number} already exists in the system.',
+                    'detail': f"A policy with number {validated_policy['policy_number']} already exists in the system.",
                     'suggestion': 'Please check your policy number and try again with a different number.'
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -114,11 +120,20 @@ def upload_policy_document(request):
         # Create policy record first
         policy = Policy.objects.create(
             user=user,
-            policy_number=policy_number,
-            start_date=start_date,
-            end_date=end_date,
+            policy_number=validated_policy['policy_number'],
+            start_date=validated_policy['start_date'],
+            end_date=validated_policy['end_date'],
             policy_document_url='',  # Will be empty, we store metadata instead
             status='pending'
+        )
+        PolicyEvent.objects.create(
+            policy=policy,
+            event_type='submitted',
+            event_label='Policy submitted for verification',
+            metadata={
+                'status': policy.status,
+                'workflow_label': policy.workflow_label,
+            }
         )
         
         # Generate file path: user_<user_id>/policies/<policy_id>/<uuid>.<ext>
@@ -198,6 +213,8 @@ def upload_policy_document(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
+    except serializers.ValidationError as e:
+        return Response(e.detail, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
         # Rollback policy if it was created
         if 'policy' in locals():

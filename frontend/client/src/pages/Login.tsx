@@ -6,9 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Mail, Lock, ArrowRight } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { useLocation } from "wouter";
-import { authService } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
 import AnimatedBackground from "@/components/AnimatedBackground";
 
@@ -33,36 +33,38 @@ export default function Login() {
   async function onSubmit(values: z.infer<typeof loginSchema>) {
     setIsPending(true);
     try {
-      const result = await authService.signIn(values.email, values.password);
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: values.email,
+        password: values.password,
+      });
 
-      if (result.user) {
-        // Get role from Supabase user metadata
-        const userRole = result.user.user_metadata?.role || 'user';
-
-        // Store auth data in localStorage for useAuth hook
-        localStorage.setItem('mediclaim_auth_user_id', result.user.id);
-        localStorage.setItem('mediclaim_auth_role', userRole);
-        localStorage.setItem('mediclaim_auth_email', result.user.email || '');
-
-        toast({
-          title: "Welcome back!",
-          description: "You have successfully signed in.",
-        });
-
-        // Redirect based on role
-        if (userRole === "admin") {
-          setLocation("/admin");
-        } else {
-          setLocation("/portal");
-        }
+      if (error) {
+        throw error;
       }
+
+      if (!data.session || !data.user) {
+        throw new Error("Supabase session was not created");
+      }
+
+      const userRole = (data.user.user_metadata?.role || data.user.app_metadata?.role || "user") as "user" | "admin";
+
+      toast({
+        title: "Welcome back!",
+        description: "You have successfully signed in.",
+      });
+
+      setLocation(userRole === "admin" ? "/admin" : "/portal");
     } catch (error: any) {
-      console.error('Login error:', error);
+      console.error("Login error:", error);
 
       let errorTitle = "Sign in failed";
       let errorMessage = "Invalid email or password.";
+      const exactError = [
+        error?.message,
+        error?.code ? `code=${error.code}` : null,
+        typeof error?.status === "number" ? `status=${error.status}` : null,
+      ].filter(Boolean).join(" | ");
 
-      // Check error type
       if (error.message?.includes("Email not confirmed")) {
         errorTitle = "Email not confirmed";
         errorMessage = "Please check your email and click the confirmation link before signing in.";
@@ -70,6 +72,10 @@ export default function Login() {
         errorMessage = "Invalid email or password. If you just signed up, please check your email for a confirmation link.";
       } else if (error.message) {
         errorMessage = error.message;
+      }
+
+      if (exactError) {
+        errorMessage = exactError;
       }
 
       toast({
@@ -84,10 +90,8 @@ export default function Login() {
 
   return (
     <div className="min-h-screen lg:h-screen w-full flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
-      {/* Left Panel - Animated Background */}
       <AnimatedBackground />
 
-      {/* Right Panel - Auth Form */}
       <div className="w-full lg:w-[60%] bg-[#FDFBF7] flex items-center justify-center p-5 sm:p-6 md:p-8 lg:p-12 relative overflow-hidden">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -95,7 +99,6 @@ export default function Login() {
           transition={{ type: "spring", stiffness: 300, damping: 30 }}
           className="w-full max-w-xl my-auto py-5 sm:py-8"
         >
-          {/* Header */}
           <div className="mb-6 sm:mb-8">
             <h1 className="text-4xl sm:text-5xl md:text-6xl font-serif font-bold tracking-tight text-[#111827] mb-3">
               Welcome Back
@@ -105,7 +108,6 @@ export default function Login() {
             </p>
           </div>
 
-          {/* Form */}
           <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
               <motion.div
@@ -124,12 +126,12 @@ export default function Login() {
                       <FormControl>
                         <div className="relative">
                           <Mail className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                            <Input
-                              type="email"
-                              placeholder="you@company.com"
-                              {...field}
-                              className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                            />
+                          <Input
+                            type="email"
+                            placeholder="you@company.com"
+                            {...field}
+                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
+                          />
                         </div>
                       </FormControl>
                       <FormMessage />
@@ -154,12 +156,12 @@ export default function Login() {
                       <FormControl>
                         <div className="relative">
                           <Lock className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                            <Input
-                              type="password"
-                              placeholder="Enter your password"
-                              {...field}
-                              className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                            />
+                          <Input
+                            type="password"
+                            placeholder="Enter your password"
+                            {...field}
+                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
+                          />
                         </div>
                       </FormControl>
                       <FormMessage />
@@ -205,7 +207,6 @@ export default function Login() {
             </form>
           </Form>
 
-          {/* Footer */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -223,7 +224,6 @@ export default function Login() {
             </p>
           </motion.div>
 
-          {/* Security Badge */}
           <div className="mt-8 pt-6 border-t border-[#E5E7EB]">
             <div className="flex items-center justify-center gap-2 text-xs text-[#6B7280]">
               <Lock className="w-3 h-3" />

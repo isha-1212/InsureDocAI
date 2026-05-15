@@ -3,12 +3,14 @@ from rest_framework import serializers
 from django.utils import timezone
 from .models import Policy, FamilyMember
 from .models_document import PolicyDocument
+from .policy_validation import parse_policy_number, validate_policy_payload
 from users.models import User
 
 
 class FamilyMemberSerializer(serializers.ModelSerializer):
     
     age = serializers.ReadOnlyField()
+    has_claims = serializers.SerializerMethodField()
     
     class Meta:
         model = FamilyMember
@@ -21,8 +23,13 @@ class FamilyMemberSerializer(serializers.ModelSerializer):
             'relation',
             'is_minor',
             'created_at',
+            'has_claims',
         ]
-        read_only_fields = ['id', 'is_minor', 'created_at', 'age']
+        read_only_fields = ['id', 'is_minor', 'created_at', 'age', 'has_claims']
+    
+    def get_has_claims(self, obj):
+        """Check if family member has any associated claims"""
+        return obj.claims.exists()
     
     def validate_dob(self, value):
         """Validate date of birth is not in future"""
@@ -51,6 +58,10 @@ class PolicySerializer(serializers.ModelSerializer):
     is_active = serializers.ReadOnlyField()
     is_expired = serializers.ReadOnlyField()
     has_document = serializers.SerializerMethodField()
+    remaining_coverage_amount = serializers.ReadOnlyField()
+    is_editable = serializers.ReadOnlyField()
+    workflow_label = serializers.ReadOnlyField()
+    timeline = serializers.SerializerMethodField()
     
     # User details
     user_email = serializers.EmailField(source='user.email', read_only=True)
@@ -74,10 +85,16 @@ class PolicySerializer(serializers.ModelSerializer):
             'has_document',
             'status',
             'rejection_reason',
+            'total_coverage_amount',
+            'used_coverage_amount',
+            'remaining_coverage_amount',
+            'is_editable',
+            'workflow_label',
             'is_active',
             'is_expired',
             'family_members',
             'family_members_count',
+            'timeline',
             'created_at',
             'updated_at',
         ]
@@ -91,21 +108,37 @@ class PolicySerializer(serializers.ModelSerializer):
         """Return True if there is at least one PolicyDocument attached."""
         # Uses related_name='documents' from PolicyDocument model
         return obj.documents.exists()
+
+    def get_timeline(self, obj):
+        events = []
+        for event in obj.timeline_events.all():
+            events.append({
+                'eventType': event.event_type,
+                'label': event.event_label,
+                'timestamp': event.created_at.isoformat() if event.created_at else None,
+                'metadata': event.metadata or {},
+            })
+        return events
     
     def validate_policy_number(self, value):
         """Ensure policy number is unique"""
+        parse_policy_number(value)
         instance = self.instance
         if Policy.objects.filter(policy_number=value).exclude(pk=instance.pk if instance else None).exists():
             raise serializers.ValidationError("Policy number already exists")
         return value
     
     def validate(self, data):
-        """Validate date range"""
-        if 'start_date' in data and 'end_date' in data:
-            if data['start_date'] >= data['end_date']:
-                raise serializers.ValidationError({
-                    'end_date': 'End date must be after start date'
-                })
+        """Validate policy business rules"""
+        policy_number = data.get('policy_number', getattr(self.instance, 'policy_number', None))
+        start_date = data.get('start_date', getattr(self.instance, 'start_date', None))
+        end_date = data.get('end_date', getattr(self.instance, 'end_date', None))
+
+        validate_policy_payload(
+            policy_number=policy_number,
+            start_date_value=start_date,
+            end_date_value=end_date,
+        )
         return data
 
 
@@ -129,16 +162,19 @@ class PolicyCreateSerializer(serializers.ModelSerializer):
     
     def validate_policy_number(self, value):
         """Ensure policy number is unique"""
+        parse_policy_number(value)
         if Policy.objects.filter(policy_number=value).exists():
             raise serializers.ValidationError("Policy number already exists")
         return value
     
     def validate(self, data):
-        """Validate date range"""
-        if data['start_date'] >= data['end_date']:
-            raise serializers.ValidationError({
-                'end_date': 'End date must be after start date'
-            })
+        """Validate policy business rules"""
+        validate_policy_payload(
+            policy_number=data.get('policy_number'),
+            start_date_value=data.get('start_date'),
+            end_date_value=data.get('end_date'),
+            family_members=data.get('family_members') or [],
+        )
         return data
     
     def create(self, validated_data):
@@ -172,20 +208,23 @@ class PolicyUpdateSerializer(serializers.ModelSerializer):
     
     def validate_policy_number(self, value):
         """Ensure policy number is unique"""
+        parse_policy_number(value)
         instance = self.instance
         if Policy.objects.filter(policy_number=value).exclude(pk=instance.pk).exists():
             raise serializers.ValidationError("Policy number already exists")
         return value
     
     def validate(self, data):
-        """Validate date range"""
+        """Validate policy business rules"""
         start_date = data.get('start_date', self.instance.start_date)
         end_date = data.get('end_date', self.instance.end_date)
-        
-        if start_date >= end_date:
-            raise serializers.ValidationError({
-                'end_date': 'End date must be after start date'
-            })
+        policy_number = data.get('policy_number', self.instance.policy_number)
+
+        validate_policy_payload(
+            policy_number=policy_number,
+            start_date_value=start_date,
+            end_date_value=end_date,
+        )
         return data
 
 
@@ -196,15 +235,49 @@ class PolicyStatusUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Policy
-        fields = ['status', 'rejection_reason']
-    
+        fields = ['status', 'rejection_reason', 'total_coverage_amount']
+
     def validate(self, data):
         """Ensure rejection_reason is provided when rejecting"""
-        if data.get('status') == 'rejected' and not data.get('rejection_reason'):
+        next_status = data.get('status', getattr(self.instance, 'status', None))
+        current_status = getattr(self.instance, 'status', None)
+
+        if next_status == 'rejected' and not data.get('rejection_reason'):
             raise serializers.ValidationError({
                 'rejection_reason': 'Rejection reason is required when rejecting a policy'
             })
+        if next_status == 'approved':
+            coverage_amount = data.get('total_coverage_amount', getattr(self.instance, 'total_coverage_amount', 0))
+            if coverage_amount in (None, '', 0) or float(coverage_amount) <= 0:
+                raise serializers.ValidationError({
+                    'total_coverage_amount': 'Please enter coverage amount'
+                })
+        if current_status == 'rejected':
+            raise serializers.ValidationError({
+                'status': 'Rejected policies are locked and cannot be modified'
+            })
+        if current_status == 'approved' and next_status == 'approved':
+            raise serializers.ValidationError({
+                'status': 'Approved policies must be reopened before they can be approved again'
+            })
+        if current_status == 'approved' and next_status == 'rejected':
+            raise serializers.ValidationError({
+                'status': 'Approved policies must be reopened before they can be rejected'
+            })
         return data
+
+    def update(self, instance, validated_data):
+        status_value = validated_data.get('status', instance.status)
+        if status_value == 'approved':
+            instance.total_coverage_amount = validated_data.get('total_coverage_amount', instance.total_coverage_amount)
+            instance.used_coverage_amount = 0
+            instance.rejection_reason = None
+        elif status_value == 'rejected':
+            instance.rejection_reason = validated_data.get('rejection_reason', instance.rejection_reason)
+
+        instance.status = status_value
+        instance.save()
+        return instance
 
 
 class PolicyListSerializer(serializers.ModelSerializer):
@@ -216,9 +289,12 @@ class PolicyListSerializer(serializers.ModelSerializer):
     family_members_count = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source='user.email', read_only=True)
     user_name = serializers.CharField(source='user.full_name', read_only=True)
-    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    user_id = serializers.IntegerField(source='user.user_id', read_only=True)
     is_active = serializers.ReadOnlyField()
     has_document = serializers.SerializerMethodField()
+    remaining_coverage_amount = serializers.ReadOnlyField()
+    is_editable = serializers.ReadOnlyField()
+    workflow_label = serializers.ReadOnlyField()
     
     class Meta:
         model = Policy
@@ -231,6 +307,11 @@ class PolicyListSerializer(serializers.ModelSerializer):
             'start_date',
             'end_date',
             'status',
+            'total_coverage_amount',
+            'used_coverage_amount',
+            'remaining_coverage_amount',
+            'is_editable',
+            'workflow_label',
             'is_active',
              'has_document',
             'family_members_count',

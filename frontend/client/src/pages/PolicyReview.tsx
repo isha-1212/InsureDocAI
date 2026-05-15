@@ -91,15 +91,7 @@ export default function PolicyReview() {
                     })()}
                   </TableCell>
                   <TableCell>
-                    <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium border
-                      ${policy.status === 'approved'
-                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                        : policy.status === 'pending'
-                          ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30'
-                          : 'bg-red-500/20 text-red-400 border-red-500/30'
-                      }`}>
-                      {policy.status}
-                    </span>
+                    <StatusBadge status={policy.workflow_label || policy.status} />
                   </TableCell>
                   <TableCell className="text-right">
                     <Link href={`/admin/policies/${policy.id}`}>

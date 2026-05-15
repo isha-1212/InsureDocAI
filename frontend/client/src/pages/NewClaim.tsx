@@ -59,10 +59,14 @@ export default function NewClaim() {
   const { userId } = useAuth();
   const { data: policy } = usePolicies(userId!);
   const { data: members } = useMembers(policy?.id || 0);
+  
   const [selectedMember, setSelectedMember] = useState<any>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
   const [dragActive, setDragActive] = useState<string | null>(null);
+  const totalCoverage = Number((policy as any)?.total_coverage_amount || 0);
+  const usedCoverage = Number((policy as any)?.used_coverage_amount || 0);
+  const remainingCoverage = Number((policy as any)?.remaining_coverage_amount || Math.max(totalCoverage - usedCoverage, 0));
 
   const form = useForm({
     resolver: zodResolver(createClaimFormSchema),
@@ -76,6 +80,8 @@ export default function NewClaim() {
       birthCert: null
     }
   });
+  const enteredAmount = Number(form.watch('totalAmount') || 0);
+  const exceedsCoverage = enteredAmount > 0 && remainingCoverage > 0 && enteredAmount > remainingCoverage;
 
   const getMembersArray = () => {
     if (Array.isArray(members)) return members;
@@ -88,7 +94,7 @@ export default function NewClaim() {
     form.setValue("memberId", val);
     const arr = getMembersArray();
     console.log('Selected value:', val, 'Members array:', arr);
-    const member = arr.find(m => m.id?.toString() === val);
+    const member = arr.find((m: any) => m.id?.toString() === val);
     if (!member) {
       console.warn('No member found for value:', val);
     }
@@ -160,7 +166,7 @@ export default function NewClaim() {
   };
 
   // Helper for rendering upload field with drag and drop
-  const UploadField = ({ name, label, required = false }: { name: string, label: string, required?: boolean }) => {
+  const UploadField = ({ name, label, required = false, disabled = false }: { name: string, label: string, required?: boolean, disabled?: boolean }) => {
     const fieldValue = form.watch(name as any);
     const isDragging = dragActive === name;
 
@@ -198,7 +204,7 @@ export default function NewClaim() {
                 onDragLeave={handleDrag}
                 onDragOver={handleDrag}
                 onDrop={handleDrop}
-                className={`relative border-2 border-dashed rounded-xl p-4 transition-all cursor-pointer ${isDragging
+                className={`relative border-2 border-dashed rounded-xl p-4 transition-all ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${isDragging
                   ? 'border-blue-400 bg-blue-500/10'
                   : fieldValue
                     ? 'border-emerald-500/50 bg-emerald-500/10'
@@ -209,10 +215,12 @@ export default function NewClaim() {
                   type="file"
                   accept="image/*,application/pdf"
                   onChange={e => {
+                    if (disabled) return;
                     const file = e.target.files?.[0] || null;
                     field.onChange(file);
                   }}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  className="absolute inset-0 w-full h-full opacity-0"
+                  disabled={disabled}
                 />
                 {fieldValue && typeof fieldValue === 'object' ? (
                   <div className="flex items-center gap-3">
@@ -235,12 +243,27 @@ export default function NewClaim() {
                 )}
               </div>
             </FormControl>
+            {disabled && (
+              <p className="text-xs text-rose-400 mt-2">Cannot upload documents because entered amount exceeds remaining coverage.</p>
+            )}
             <FormMessage />
           </FormItem>
         )}
       />
     );
   };
+
+  // If policy exists but is not approved, block claim creation UI
+  if (policy && (policy as any).status !== 'approved') {
+    return (
+      <Layout>
+        <div className="max-w-2xl mx-auto py-24 text-center">
+          <h2 className="text-2xl font-bold">Policy Not Approved</h2>
+          <p className="text-slate-400 mt-3">Your policy is not yet approved by the administrator. You cannot submit claims until the policy is approved.</p>
+        </div>
+      </Layout>
+    );
+  }
 
   return (
     <Layout>
@@ -317,7 +340,7 @@ export default function NewClaim() {
                               </SelectTrigger>
                             </FormControl>
                             <SelectContent className="bg-slate-800 border-slate-700">
-                              {getMembersArray().map((member) => (
+                              {getMembersArray().map((member: any) => (
                                 <SelectItem key={member.id} value={member.id.toString()} className="text-white hover:bg-slate-700">
                                   {member.name} ({member.relation})
                                 </SelectItem>
@@ -363,6 +386,16 @@ export default function NewClaim() {
                                 </div>
                               </FormControl>
                               <FormMessage />
+                              {remainingCoverage > 0 && (
+                                <div className={`mt-3 rounded-xl border p-3 text-sm ${exceedsCoverage ? 'border-rose-500/30 bg-rose-500/10 text-rose-200' : 'border-slate-700 bg-slate-800/40 text-slate-300'}`}>
+                                  <p>Total Coverage: ₹{totalCoverage.toFixed(0)}</p>
+                                  <p>Used Coverage: ₹{usedCoverage.toFixed(0)}</p>
+                                  <p>Remaining Coverage: ₹{remainingCoverage.toFixed(0)}</p>
+                                  {exceedsCoverage && (
+                                    <p className="mt-2 font-medium text-rose-300">Requested amount exceeds remaining coverage.</p>
+                                  )}
+                                </div>
+                              )}
                             </FormItem>
                           )}
                         />
@@ -400,23 +433,28 @@ export default function NewClaim() {
                       )}
 
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <UploadField name="hospitalBill" label="Hospital Bill" required />
-                        <UploadField name="pharmacyBill" label="Pharmacy Bill" />
+                        <UploadField name="hospitalBill" label="Hospital Bill" required disabled={exceedsCoverage} />
+                        <UploadField name="pharmacyBill" label="Pharmacy Bill" disabled={exceedsCoverage} />
 
                         {/* Conditional Logic based on Minor/Adult */}
                         {selectedMember.is_minor ? (
                           <>
-                            <UploadField name="birthCert" label="Birth Certificate" required />
-                            <UploadField name="aadhaar" label="Parent's Aadhaar" required />
-                            <UploadField name="pan" label="Parent's PAN Card" required />
+                            <UploadField name="birthCert" label="Birth Certificate" required disabled={exceedsCoverage} />
+                            <UploadField name="aadhaar" label="Parent's Aadhaar" required disabled={exceedsCoverage} />
+                            <UploadField name="pan" label="Parent's PAN Card" required disabled={exceedsCoverage} />
                           </>
                         ) : (
                           <>
-                            <UploadField name="aadhaar" label="Aadhaar Card" required />
-                            <UploadField name="pan" label="PAN Card" />
+                            <UploadField name="aadhaar" label="Aadhaar Card" required disabled={exceedsCoverage} />
+                            <UploadField name="pan" label="PAN Card" disabled={exceedsCoverage} />
                           </>
                         )}
                       </div>
+                      {exceedsCoverage && (
+                        <div className="mt-4 rounded-lg bg-rose-900/20 border border-rose-600/30 p-3">
+                          <p className="text-sm text-rose-300">Entered amount exceeds remaining policy coverage. Adjust the claim amount before uploading documents or submitting the claim.</p>
+                        </div>
+                      )}
                     </motion.div>
                   )}
 
@@ -425,7 +463,7 @@ export default function NewClaim() {
                     type="submit"
                     size="lg"
                     className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 hover:from-purple-600 hover:via-pink-600 hover:to-blue-600 text-white shadow-xl shadow-purple-500/30 hover:shadow-2xl hover:shadow-purple-500/50 transition-all duration-300 hover:scale-105 active:scale-95 rounded-xl border border-purple-400/20"
-                    disabled={isSubmitting || !selectedMember}
+                    disabled={isSubmitting || !selectedMember || exceedsCoverage}
                   >
                     {isSubmitting ? (
                       <>

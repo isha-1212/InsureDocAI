@@ -221,8 +221,7 @@ def _build_recent_records(model, limit=10):
 
 def _build_document_processing_insights():
     try:
-        from .models_document import ClaimDocument, ClaimExtractedField
-        from users.models import User
+        from .models_document import ClaimDocument, ClaimExtractedField, PolicyDocument
         from .models_claim import Claim
     except Exception:
         return {
@@ -231,7 +230,7 @@ def _build_document_processing_insights():
             "document_distribution": [],
             "cards": {
                 "total_documents_processed": 0,
-                "total_users": 0,
+                "total_policy_upload_users": 0,
                 "total_claims": 0,
             },
             "avg_confidence_by_type": [],
@@ -341,6 +340,23 @@ def _build_document_processing_insights():
     total_compared = matched + mismatched
     match_rate = round((matched / total_compared) * 100, 2) if total_compared else 0
     mismatch_rate = round((mismatched / total_compared) * 100, 2) if total_compared else 0
+    total_policy_upload_users = (
+        PolicyDocument.objects.filter(
+            document_type="POLICY",
+            policy__user__role="user",
+        )
+        .values("policy__user_id")
+        .distinct()
+        .count()
+    )
+
+    # Calculate pending metrics for bar chart
+    from .models import Policy
+    pending_policies = Policy.objects.exclude(status='approved').count()
+    pending_claims = Claim.objects.filter(status='pending').count()
+    documents_for_review = ClaimDocument.objects.filter(
+        claim__status__in=['pending', 'reapplied']
+    ).count()
 
     return {
         "documents_per_day": documents_per_day,
@@ -348,10 +364,20 @@ def _build_document_processing_insights():
         "document_distribution": documents_by_type,
         "cards": {
             "total_documents_processed": ClaimDocument.objects.count(),
-            "total_users": User.objects.count(),
+            "total_policy_upload_users": total_policy_upload_users,
             "total_claims": Claim.objects.count(),
         },
         "avg_confidence_by_type": avg_confidence_by_type,
+        "pending_metrics": {
+            "pending_policies": pending_policies,
+            "pending_claims": pending_claims,
+            "documents_for_review": documents_for_review,
+            "breakdown": [
+                {"name": "Pending Policies", "value": pending_policies},
+                {"name": "Pending Claims", "value": pending_claims},
+                {"name": "Documents for Review", "value": documents_for_review},
+            ],
+        },
         "cross_document_matching": {
             "matched": matched,
             "mismatched": mismatched,
@@ -419,7 +445,7 @@ def _build_admin_overview_payload():
 
 
 @api_view(["GET"])
-@permission_classes([])
+@permission_classes([IsSupabaseAuthenticated])
 def admin_overview(request):
     """
     Dynamic admin overview endpoint.
@@ -437,7 +463,7 @@ def admin_overview(request):
 
 
 @api_view(["GET"])
-@permission_classes([])
+@permission_classes([IsSupabaseAuthenticated])
 def admin_recent(request):
     """
     Dynamic recent activity endpoint.
@@ -455,46 +481,29 @@ def admin_recent(request):
 
 
 @api_view(['GET'])
-@permission_classes([])  # Temporarily remove authentication for testing
+@permission_classes([IsSupabaseAuthenticated])
 def get_claims_for_review(request):
     """
-    Get all claims that need admin review
-    Returns claims with their associated documents and user information
+    Get claims grouped for claim workflow review.
     """
     try:
-        # Get the user from the request (set by authentication middleware)
-        user_email = getattr(request, 'user_email', None)
-        
-        # For testing, allow unauthenticated access
-        # if not user_email:
-        #     return Response({
-        #         'error': 'User authentication required'
-        #     }, status=status.HTTP_401_UNAUTHORIZED)
-        
-        # TODO: Add admin permission check here when user roles are implemented
-        # For now, all authenticated users can access
-        
-        logger.info("Starting to fetch claims for admin review")
-        
-        # First, let's get basic counts for debugging
-        from .models import Policy
-        total_users = User.objects.count()
-        total_claims = Claim.objects.count()
-        total_documents = ClaimDocument.objects.count()
-        total_policies = Policy.objects.count()
-        
-        logger.info(f"Database counts - Users: {total_users}, Claims: {total_claims}, Documents: {total_documents}, Policies: {total_policies}")
-        
-        # Fetch claims + documents in one SQL query (avoids N+1 query pattern).
+        admin_email = getattr(request, 'email', None)
+        admin_user = User.objects.filter(email=admin_email, role='admin').first() if admin_email else None
+        if not admin_user:
+            return Response({'detail': 'Admin permission required'}, status=status.HTTP_403_FORBIDDEN)
+
         from django.db import connection
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT ON (c.user_id, c.policy_id)
+                SELECT
                     c.claim_id,
                     c.user_id,
                     c.policy_id,
                     c.status,
                     c.created_at,
+                    c.updated_at,
+                    c.rejection_reason,
+                    c.is_reapplied,
                     u.user_id as user_pk,
                     u.name,
                     u.full_name,
@@ -523,14 +532,16 @@ def get_claims_for_review(request):
                     FROM claim_documents cd
                     WHERE cd.claim_id = c.claim_id
                 ) docs ON TRUE
-                WHERE c.status = 'pending'
+                WHERE c.status IN ('pending', 'approved', 'rejected', 'reapplied')
                   AND docs.document_count > 0
-                ORDER BY c.user_id, c.policy_id, c.created_at DESC
+                ORDER BY c.created_at DESC
             """)
             
             claim_rows = cursor.fetchall()
-        
-        claims_data = []
+
+        pending_claims = []
+        approved_claims = []
+        rejected_claims = []
         for row in claim_rows:
             (
                 claim_id,
@@ -538,6 +549,9 @@ def get_claims_for_review(request):
                 policy_id,
                 claim_status,
                 created_at,
+                updated_at,
+                rejection_reason,
+                is_reapplied,
                 user_pk,
                 name,
                 full_name,
@@ -573,8 +587,8 @@ def get_claims_for_review(request):
             
             # Get user's display name
             user_name = name or full_name or email or f"User {user_pk}"
-            
-            claims_data.append({
+
+            claim_payload = {
                 'claim_id': str(claim_id),
                 'user_id': user_pk,
                 'user_name': user_name,
@@ -582,23 +596,32 @@ def get_claims_for_review(request):
                 'policy_id': str(policy_id),
                 'policy_number': policy_number,
                 'status': claim_status,
+                'is_reapplied': bool(is_reapplied or claim_status == 'reapplied'),
+                'is_new_claim': claim_status == 'pending' and not is_reapplied,
+                'rejection_reason': rejection_reason,
                 'risk_level': risk_level,
                 'created_at': created_at.isoformat() if created_at else None,
+                'updated_at': updated_at.isoformat() if updated_at else None,
                 'documents': document_data,
                 'document_count': doc_count_value
-            })
-        
-        logger.info(f"Returning {len(claims_data)} claims with documents")
-        
-        return Response({
-            'claims': claims_data,
-            'total_count': len(claims_data),
-            'debug_info': {
-                'total_users': total_users,
-                'total_claims': total_claims,
-                'total_documents': total_documents,
-                'total_policies': total_policies
             }
+
+            if claim_status in ('pending', 'reapplied'):
+                pending_claims.append(claim_payload)
+            elif claim_status == 'approved':
+                approved_claims.append(claim_payload)
+            elif claim_status == 'rejected':
+                rejected_claims.append(claim_payload)
+
+        return Response({
+            'pending_claims': pending_claims,
+            'approved_claims': approved_claims,
+            'rejected_claims': rejected_claims,
+            'counts': {
+                'pending': len(pending_claims),
+                'approved': len(approved_claims),
+                'rejected': len(rejected_claims),
+            },
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
@@ -610,7 +633,7 @@ def get_claims_for_review(request):
 
 
 @api_view(['POST'])
-@permission_classes([])  # Temporarily remove authentication for testing  
+@permission_classes([IsSupabaseAuthenticated])
 def create_test_data(request):
     """
     Create test data for development - users, policies, claims, and documents
@@ -874,4 +897,199 @@ def extract_claim_data_for_review(request, claim_id):
             'error': 'ML extraction failed',
             'details': str(e),
             'claim_id': claim_id
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsSupabaseAuthenticated])
+def validate_claim_fields(request, claim_id):
+    """
+    Validate claim fields and return validation summary for admin review
+    """
+    try:
+        from .models_document import ClaimExtractedField
+        from .models import Policy
+        
+        # Get claim
+        try:
+            claim = Claim.objects.get(claim_id=claim_id)
+        except Claim.DoesNotExist:
+            return Response({
+                'error': f'Claim with ID {claim_id} not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all documents for this claim
+        documents = ClaimDocument.objects.filter(claim_id=claim_id)
+        if not documents.exists():
+            return Response({
+                'error': 'No documents found for this claim'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get extracted fields for all documents
+        extracted_fields = ClaimExtractedField.objects.filter(claim_id=claim_id)
+        
+        # Group fields by document type
+        field_groups = {}
+        confidence_scores = []
+        
+        for field in extracted_fields:
+            doc_type = field.document_type
+            if doc_type not in field_groups:
+                field_groups[doc_type] = []
+            
+            confidence = field.confidence_score or 0
+            confidence_scores.append(confidence)
+            
+            field_groups[doc_type].append({
+                'field_name': field.field_name,
+                'value': field.field_value or '',
+                'confidence': confidence
+            })
+        
+        # Calculate scores
+        average_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0
+        final_confidence = round(average_confidence, 2)
+        
+        # Determine confidence level
+        if final_confidence >= 85:
+            confidence_level = 'high'
+        elif final_confidence >= 70:
+            confidence_level = 'medium'
+        else:
+            confidence_level = 'low'
+        
+        # Get policy info
+        policy = claim.policy
+        
+        # Run validation checks
+        checks = []
+        missing_documents = []
+        low_confidence_count = 0
+        
+        # Check 1: All required documents present
+        required_doc_types = ['hospital_bill', 'aadhaar']
+        for doc_type in required_doc_types:
+            if not documents.filter(document_type=doc_type).exists():
+                missing_documents.append(doc_type)
+        
+        checks.append({
+            'type': 'documents_complete',
+            'severity': 'critical' if missing_documents else 'info',
+            'label': 'Required Documents Check',
+            'passed': len(missing_documents) == 0,
+            'action_label': f'Missing: {", ".join(missing_documents)}' if missing_documents else 'All required documents present',
+            'details': {'missing_documents': missing_documents}
+        })
+        
+        # Check 2: Confidence score check
+        low_confidence_fields = [f for f in extracted_fields if (f.confidence_score or 0) < 70]
+        low_confidence_count = len(low_confidence_fields)
+        
+        checks.append({
+            'type': 'confidence_threshold',
+            'severity': 'warning' if low_confidence_count > 2 else 'info',
+            'label': 'Extraction Confidence Check',
+            'passed': low_confidence_count <= 2,
+            'action_label': f'{low_confidence_count} fields below 70% confidence' if low_confidence_count > 0 else 'Good extraction quality',
+            'details': {'low_confidence_count': low_confidence_count}
+        })
+        
+        # Check 3: Name consistency check
+        name_fields = {}
+        for field in extracted_fields:
+            if field.field_name.lower() in ['name', 'patient_name', 'full_name']:
+                if field.document_type not in name_fields:
+                    name_fields[field.document_type] = []
+                name_fields[field.document_type].append(field.field_value)
+        
+        name_mismatch = False
+        if len(name_fields) > 1:
+            # Normalize names for comparison
+            normalized_names = set()
+            for names in name_fields.values():
+                if names:
+                    normalized = re.sub(r'[^a-z0-9]+', ' ', names[0].lower()).strip()
+                    normalized_names.add(normalized)
+            
+            name_mismatch = len(normalized_names) > 1
+        
+        checks.append({
+            'type': 'name_consistency',
+            'severity': 'warning' if name_mismatch else 'info',
+            'label': 'Cross-Document Name Consistency',
+            'passed': not name_mismatch,
+            'action_label': 'Name mismatch detected across documents' if name_mismatch else 'Names match across documents',
+            'details': {'name_fields': name_fields}
+        })
+        
+        # Check 4: Coverage validation
+        exceeds_coverage = False
+        if policy and claim.total_amount:
+            remaining_coverage = policy.remaining_coverage_amount or 0
+            if float(claim.total_amount) > remaining_coverage:
+                exceeds_coverage = True
+        
+        checks.append({
+            'type': 'coverage_validation',
+            'severity': 'critical' if exceeds_coverage else 'info',
+            'label': 'Coverage Limit Check',
+            'passed': not exceeds_coverage,
+            'action_label': f'Claim exceeds remaining coverage' if exceeds_coverage else 'Within coverage limits',
+            'details': {'exceeds_coverage': exceeds_coverage}
+        })
+        
+        # Determine overall recommendation
+        critical_failures = [c for c in checks if c['severity'] == 'critical' and not c['passed']]
+        warning_count = len([c for c in checks if c['severity'] == 'warning' and not c['passed']])
+        
+        if critical_failures:
+            recommendation_status = 'reject'
+            recommendation_label = 'Reject - Critical Issues'
+            recommendation_description = f'Found {len(critical_failures)} critical issue(s)'
+            next_action = 'Request additional documents or coverage adjustment'
+        elif warning_count >= 2:
+            recommendation_status = 'review'
+            recommendation_label = 'Manual Review Required'
+            recommendation_description = f'{warning_count} warnings detected - manual verification needed'
+            next_action = 'Contact policyholder for clarification'
+        elif final_confidence < 70:
+            recommendation_status = 'review'
+            recommendation_label = 'Manual Review Recommended'
+            recommendation_description = 'Low extraction confidence - recommend manual review'
+            next_action = 'Review extracted fields manually'
+        else:
+            recommendation_status = 'approve'
+            recommendation_label = 'Auto-Approve Eligible'
+            recommendation_description = 'All checks passed with high confidence'
+            next_action = 'Proceed with approval'
+        
+        # Build response
+        validation_summary = {
+            'claim_id': str(claim_id),
+            'final_confidence_score': final_confidence,
+            'average_field_confidence': round(average_confidence, 2),
+            'confidence_level': confidence_level,
+            'recommendation': {
+                'status': recommendation_status,
+                'label': recommendation_label,
+                'description': recommendation_description,
+                'reasons': [c['action_label'] for c in checks if not c['passed']],
+                'next_action': next_action
+            },
+            'checks': checks,
+            'field_groups': field_groups,
+            'summary': {
+                'missing_documents': missing_documents,
+                'low_confidence_count': low_confidence_count,
+                'documents_processed': documents.count()
+            }
+        }
+        
+        return Response(validation_summary, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error validating claim {claim_id}: {str(e)}", exc_info=True)
+        return Response({
+            'error': 'Validation failed',
+            'details': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

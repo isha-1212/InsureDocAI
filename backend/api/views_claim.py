@@ -6,9 +6,11 @@ from rest_framework.response import Response
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
-from .models_claim import Claim
-from .models_document import ClaimDocument
+from .models_claim import Claim, ClaimEvent
+from .models_document import ClaimDocument, ClaimExtractedField
+from .models import Policy
 from auth_service.custom_permissions import IsSupabaseAuthenticated
 from .supabase_client import upload_to_bucket, create_signed_url, get_public_url, download_file_authenticated
 import uuid as _uuid
@@ -16,6 +18,8 @@ import json
 import uuid
 from datetime import datetime
 import logging
+from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +36,238 @@ def _filter_cached_fields_for_doc_type(document_type: str, fields: list) -> list
     return [f for f in fields if f.get('field_name') in allowed or f.get('field_name') == 'extraction_error']
 
 
-def _recompute_claim_status(claim_id: str) -> str:
-    docs = ClaimDocument.objects.filter(claim_id=claim_id)
-    if not docs.exists():
-        status_value = 'pending'
+def _get_latest_document_upload_map(claim_id: str) -> dict:
+    latest_uploads = {}
+    for doc in ClaimDocument.objects.filter(claim_id=claim_id).only('document_type', 'uploaded_at'):
+        if not doc.uploaded_at:
+            continue
+        current = latest_uploads.get(doc.document_type)
+        if current is None or doc.uploaded_at > current:
+            latest_uploads[doc.document_type] = doc.uploaded_at
+    return latest_uploads
+
+
+def _approved_claims_total_for_policy(policy_id: int) -> Decimal:
+    aggregate = Claim.objects.filter(policy_id=policy_id, status='approved').aggregate(total=Sum('total_amount'))
+    return Decimal(aggregate.get('total') or 0)
+
+
+def _sync_policy_used_coverage(policy: Policy) -> Policy:
+    approved_total = max(_approved_claims_total_for_policy(policy.id), Decimal('0'))
+    if Decimal(policy.used_coverage_amount or 0) != approved_total:
+        policy.used_coverage_amount = approved_total
+        policy.save(update_fields=['used_coverage_amount'])
     else:
-        statuses = list(docs.values_list('review_status', flat=True))
-        if any(s == 'rejected' for s in statuses):
-            status_value = 'rejected'
-        elif all(s == 'approved' for s in statuses):
-            status_value = 'approved'
-        else:
-            status_value = 'pending'
-    Claim.objects.filter(claim_id=claim_id).update(status=status_value, updated_at=timezone.now())
+        policy.used_coverage_amount = approved_total
+    return policy
+
+
+def _recompute_claim_status(claim_id: str) -> str:
+    # Manual decision workflow: document review must never auto-finalize the claim.
+    # Final status changes are allowed only through explicit approve/reject endpoints.
+    status_value = 'pending'
+    with transaction.atomic():
+        claim = Claim.objects.select_for_update().filter(claim_id=claim_id).first()
+        if not claim:
+            return status_value
+
+        status_value = claim.status
+
+        policy = Policy.objects.select_for_update().filter(id=claim.policy_id).first()
+        if policy:
+            _sync_policy_used_coverage(policy)
+
     return status_value
+
+
+def _get_request_user(request):
+    supabase_user_id = getattr(request, 'user_id', None)
+    email = getattr(request, 'email', None)
+
+    user = None
+    if supabase_user_id:
+        try:
+            from users.models import User
+            user = User.objects.get(supabase_user_id=supabase_user_id)
+        except User.DoesNotExist:
+            pass
+
+    if not user and email:
+        try:
+            from users.models import User
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            pass
+
+    return user
+
+
+def _get_admin_user(request):
+    user = _get_request_user(request)
+    if not user or user.role != 'admin':
+        return None
+    return user
+
+
+def _infer_document_status(review_status: str | None, exists: bool = True) -> str:
+    if not exists:
+        return 'missing'
+    if review_status == 'approved':
+        return 'verified'
+    return 'issue'
+
+
+def _get_expected_document_types(claim) -> list[str]:
+    required = ['hospital_bill', 'aadhaar']
+    try:
+        if getattr(claim, 'member', None) and getattr(claim.member, 'is_minor', False):
+            required.extend(['birth_certificate', 'pan'])
+    except Exception:
+        pass
+    return required
+
+
+def _serialize_timeline(claim_id) -> list[dict]:
+    claim = Claim.objects.filter(claim_id=claim_id).only('status', 'updated_at', 'created_at', 'rejection_reason').first()
+    meaningful_event_types = {'submitted', 'rejected', 'reapplied', 'reopened', 'approved'}
+    serialized = []
+    previous_signature = None
+    for event in ClaimEvent.objects.filter(claim_id=claim_id).order_by('created_at', 'id'):
+        if event.event_type not in meaningful_event_types:
+            continue
+        metadata = event.metadata or {}
+        signature = (
+            event.event_type,
+            event.event_label,
+            metadata.get('reason'),
+        )
+        payload = {
+            'eventType': event.event_type,
+            'label': event.event_label,
+            'timestamp': event.created_at.isoformat() if event.created_at else None,
+            'metadata': metadata,
+        }
+        if signature == previous_signature and serialized:
+            serialized[-1] = payload
+            continue
+        serialized.append(payload)
+        previous_signature = signature
+    if not claim:
+        return serialized
+
+    current_event_map = {
+        'approved': 'Current: Approved',
+        'rejected': 'Current: Rejected',
+        'reapplied': 'Current: Pending Review',
+        'pending': 'Current: Pending Review',
+    }
+    current_event_type = str(claim.status or 'pending').lower()
+    current_payload = {
+        'eventType': current_event_type,
+        'label': current_event_map.get(current_event_type, 'Current'),
+        'timestamp': (claim.updated_at or claim.created_at).isoformat() if (claim.updated_at or claim.created_at) else None,
+        'metadata': {'current': True},
+    }
+    if current_event_type == 'rejected':
+        current_payload['metadata']['reason'] = getattr(claim, 'rejection_reason', None)
+
+    if serialized and serialized[-1]['label'] == current_payload['label']:
+        serialized[-1] = current_payload
+    elif serialized and serialized[-1]['eventType'] == current_event_type and current_event_type in {'approved', 'rejected'}:
+        serialized[-1] = current_payload
+    else:
+        serialized.append(current_payload)
+    return serialized
+
+
+def _build_claim_snapshot(claim) -> dict:
+    documents = []
+    for doc in ClaimDocument.objects.filter(claim_id=claim.claim_id).order_by('document_type'):
+        documents.append({
+            'document_type': doc.document_type,
+            'file_path': doc.file_path,
+            'review_status': doc.review_status,
+            'document_status': _infer_document_status(doc.review_status, True),
+        })
+    return {
+        'member_id': claim.member_id,
+        'member_name': claim.member.name if getattr(claim, 'member', None) else 'Policy holder',
+        'total_amount': str(claim.total_amount) if claim.total_amount is not None else '',
+        'documents': documents,
+    }
+
+
+def _compute_change_summary(previous_snapshot: dict | None, current_snapshot: dict) -> list[dict]:
+    if not previous_snapshot:
+        return []
+
+    changes = []
+    if str(previous_snapshot.get('total_amount', '')) != str(current_snapshot.get('total_amount', '')):
+        changes.append({
+            'field': 'total_amount',
+            'label': 'Amount changed',
+            'before': previous_snapshot.get('total_amount'),
+            'after': current_snapshot.get('total_amount'),
+        })
+
+    if str(previous_snapshot.get('member_id', '')) != str(current_snapshot.get('member_id', '')):
+        changes.append({
+            'field': 'member',
+            'label': 'Member changed',
+            'before': previous_snapshot.get('member_name'),
+            'after': current_snapshot.get('member_name'),
+        })
+
+    prev_docs = {doc['document_type']: doc for doc in previous_snapshot.get('documents', [])}
+    curr_docs = {doc['document_type']: doc for doc in current_snapshot.get('documents', [])}
+
+    for document_type, current_doc in curr_docs.items():
+        previous_doc = prev_docs.get(document_type)
+        if not previous_doc:
+            changes.append({
+                'field': f'document:{document_type}',
+                'label': f'{document_type} added',
+                'before': None,
+                'after': 'uploaded',
+            })
+            continue
+        if previous_doc.get('file_path') != current_doc.get('file_path'):
+            changes.append({
+                'field': f'document:{document_type}',
+                'label': f'{document_type} replaced',
+                'before': previous_doc.get('file_path'),
+                'after': current_doc.get('file_path'),
+            })
+
+    for document_type in prev_docs.keys() - curr_docs.keys():
+        changes.append({
+            'field': f'document:{document_type}',
+            'label': f'{document_type} removed',
+            'before': 'uploaded',
+            'after': None,
+        })
+
+    return changes
+
+
+def _serialize_policy_coverage(policy) -> dict:
+    total_coverage = Decimal(policy.total_coverage_amount or 0)
+    used_coverage = Decimal(policy.used_coverage_amount or 0)
+    remaining_coverage = max(total_coverage - used_coverage, Decimal('0'))
+    return {
+        'total_coverage_amount': float(total_coverage),
+        'used_coverage_amount': float(used_coverage),
+        'remaining_coverage_amount': float(remaining_coverage),
+    }
+
+
+def _log_claim_event(claim, event_type: str, label: str, metadata: dict | None = None):
+    ClaimEvent.objects.create(
+        claim_id=claim.claim_id,
+        event_type=event_type,
+        event_label=label,
+        metadata=metadata or {},
+    )
 
 
 @api_view(['GET', 'POST'])
@@ -57,25 +279,7 @@ def create_claim(request):
     or list authenticated user's claims (GET).
     """
     try:
-        # Get authenticated user from request
-        supabase_user_id = getattr(request, 'user_id', None)
-        email = getattr(request, 'email', None)
-        
-        # Find the user
-        user = None
-        if supabase_user_id:
-            try:
-                from users.models import User
-                user = User.objects.get(supabase_user_id=supabase_user_id)
-            except User.DoesNotExist:
-                pass
-                
-        if not user and email:
-            try:
-                user = User.objects.get(email=email)
-            except User.DoesNotExist:
-                pass
-                
+        user = _get_request_user(request)
         if not user:
             return Response({
                 'detail': 'User not authenticated or not found'
@@ -90,6 +294,9 @@ def create_claim(request):
                         c.claim_id,
                         c.status,
                         c.created_at,
+                        c.updated_at,
+                        c.rejection_reason,
+                        c.is_reapplied,
                         COALESCE(
                             c.total_amount,
                             amt.total_amount_extracted
@@ -134,7 +341,7 @@ def create_claim(request):
                         LIMIT 1
                     ) name_from_extract ON TRUE
                     WHERE c.user_id = %s::uuid
-                    GROUP BY c.claim_id, c.status, c.created_at, c.total_amount, c.member_id, fm.name, amt.total_amount_extracted, name_from_extract.member_name_extracted
+                    GROUP BY c.claim_id, c.status, c.created_at, c.updated_at, c.rejection_reason, c.is_reapplied, c.total_amount, c.member_id, fm.name, amt.total_amount_extracted, name_from_extract.member_name_extracted
                     ORDER BY c.created_at DESC
                     """,
                     [str(user.supabase_user_id)],
@@ -143,7 +350,19 @@ def create_claim(request):
 
             claims = []
             for row in rows:
-                claim_id, claim_status, created_at, total_amount, member_id, member_name, document_count, documents_json = row
+                (
+                    claim_id,
+                    claim_status,
+                    created_at,
+                    updated_at,
+                    rejection_reason,
+                    is_reapplied,
+                    total_amount,
+                    member_id,
+                    member_name,
+                    document_count,
+                    documents_json,
+                ) = row
                 if isinstance(documents_json, str):
                     try:
                         documents_json = json.loads(documents_json)
@@ -158,23 +377,32 @@ def create_claim(request):
                         'documentId': str(doc_id) if doc_id is not None else None,
                         'documentType': doc_type,
                         'status': doc.get("review_status") or 'pending',
+                        'documentStatus': _infer_document_status(doc.get("review_status"), True),
                         'remarks': doc.get("review_remarks"),
                         # Keep list endpoint fast: fetch actual bytes only when user clicks View.
                         'viewUrl': f"/api/admin/claims/{claim_id}/documents/{doc_id}/download/" if doc_id else None,
                         'reuploadUrl': '/portal/claims/new',
                     })
 
+                timeline = _serialize_timeline(claim_id)
+                reapplied_event = next((event for event in reversed(timeline) if event['eventType'] == 'reapplied'), None)
+
                 claims.append({
                     'id': str(claim_id),
                     'status': claim_status,
                     'submittedDate': created_at.isoformat() if created_at else None,
+                    'updatedAt': updated_at.isoformat() if updated_at else None,
                     'totalAmount': float(total_amount) if total_amount is not None else 0.0,
+                    'rejectionReason': rejection_reason,
+                    'isReapplied': bool(is_reapplied or claim_status == 'reapplied'),
                     'member': {
                         'id': int(member_id) if member_id else None,
                         'name': member_name,
                     },
                     'documentCount': int(document_count or 0),
                     'documents': documents,
+                    'timeline': timeline,
+                    'changeSummary': (reapplied_event or {}).get('metadata', {}).get('changesSummary', []),
                 })
 
             return Response(claims, status=status.HTTP_200_OK)
@@ -211,6 +439,12 @@ def create_claim(request):
                 'detail': 'Policy not found or does not belong to user'
             }, status=status.HTTP_404_NOT_FOUND)
 
+        # Disallow claim creation until policy is approved by admin
+        if policy.status != 'approved':
+            return Response({
+                'detail': 'Policy must be approved by admin before creating claims'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             from .models import FamilyMember
             member = FamilyMember.objects.get(id=member_id, policy=policy)
@@ -226,8 +460,19 @@ def create_claim(request):
         claim_id = None
         with connection.cursor() as cursor:
             cursor.execute("""
-                INSERT INTO claims (claim_id, user_id, policy_id, member_id, total_amount, status, created_at, updated_at)
-                VALUES (gen_random_uuid(), %s::uuid, %s, %s, %s, 'pending', NOW(), NOW())
+                INSERT INTO claims (
+                    claim_id,
+                    user_id,
+                    policy_id,
+                    member_id,
+                    total_amount,
+                    status,
+                    is_reopened,
+                    is_reapplied,
+                    created_at,
+                    updated_at
+                )
+                VALUES (gen_random_uuid(), %s::uuid, %s, %s, %s, 'pending', FALSE, FALSE, NOW(), NOW())
                 RETURNING claim_id
             """, [str(user.supabase_user_id), policy.id, member.id, total_amount])
             
@@ -252,54 +497,90 @@ def create_claim(request):
             'pan': 'pan',
             'birth_certificate': 'Birth_certificates'
         }
-        
-        for field_name, bucket_name in document_buckets.items():
-            if field_name in request.FILES:
-                file_obj = request.FILES[field_name]
-                
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                unique_id = str(uuid.uuid4())[:8]
-                file_extension = file_obj.name.split('.')[-1] if '.' in file_obj.name else 'pdf'
-                file_path = f"{user.user_id}/{field_name}_{timestamp}_{unique_id}.{file_extension}"
-                
-                file_bytes = file_obj.read()
-                content_type = file_obj.content_type or 'application/octet-stream'
-                
-                try:
-                    resp = upload_to_bucket(bucket_name, file_path, file_bytes, content_type)
-                    
-                    if resp.status_code in [200, 201]:
-                        file_url = f"{bucket_name}/{file_path}"
-                        
-                        # Save document to ClaimDocument table with only available fields
-                        document = ClaimDocument.objects.create(
-                            claim_id=claim.claim_id,
-                            document_type=field_name,
-                            file_url=file_url,
-                            file_path=file_path
-                        )
-                        
-                        logger.info(f"Saved document {document.document_id} for claim {claim.claim_id}")
-                        
-                        uploaded_files.append({
-                            'document_id': str(document.document_id),
-                            'type': field_name,
-                            'filename': file_obj.name,
-                            'url': file_url,
-                            'size': file_obj.size,
-                            'bucket': bucket_name
-                        })
-                    else:
-                        raise RuntimeError(f'Failed to upload {field_name}: {resp.text}')
-                        
-                except Exception as upload_error:
-                    raise RuntimeError(f'Error uploading {field_name}: {str(upload_error)}')
+
+        upload_tasks = []
+        for index, (field_name, bucket_name) in enumerate(document_buckets.items()):
+            if field_name not in request.FILES:
+                continue
+            file_obj = request.FILES[field_name]
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            unique_id = str(uuid.uuid4())[:8]
+            file_extension = file_obj.name.split('.')[-1] if '.' in file_obj.name else 'pdf'
+            file_path = f"{user.user_id}/{field_name}_{timestamp}_{unique_id}.{file_extension}"
+            upload_tasks.append({
+                'index': index,
+                'field_name': field_name,
+                'bucket_name': bucket_name,
+                'filename': file_obj.name,
+                'size': file_obj.size,
+                'file_path': file_path,
+                'file_bytes': file_obj.read(),
+                'content_type': file_obj.content_type or 'application/octet-stream',
+            })
+
+        if not upload_tasks:
+            transaction.set_rollback(True)
+            return Response({
+                'detail': 'No valid claim documents were provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        def _upload_single_document(task):
+            response = upload_to_bucket(
+                task['bucket_name'],
+                task['file_path'],
+                task['file_bytes'],
+                task['content_type'],
+            )
+            if response.status_code not in [200, 201]:
+                raise RuntimeError(f"Failed to upload {task['field_name']}: {response.text}")
+            return {
+                **task,
+                'file_url': f"{task['bucket_name']}/{task['file_path']}",
+            }
+
+        upload_results = []
+        max_workers = min(4, len(upload_tasks))
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(_upload_single_document, task): task
+                    for task in upload_tasks
+                }
+                for future in as_completed(future_map):
+                    upload_results.append(future.result())
+        except Exception as upload_error:
+            raise RuntimeError(f'Error uploading claim documents: {str(upload_error)}')
+
+        upload_results.sort(key=lambda item: item['index'])
+
+        for uploaded in upload_results:
+            document = ClaimDocument.objects.create(
+                claim_id=claim.claim_id,
+                document_type=uploaded['field_name'],
+                file_url=uploaded['file_url'],
+                file_path=uploaded['file_path'],
+            )
+
+            logger.info(f"Saved document {document.document_id} for claim {claim.claim_id}")
+
+            uploaded_files.append({
+                'document_id': str(document.document_id),
+                'type': uploaded['field_name'],
+                'filename': uploaded['filename'],
+                'url': uploaded['file_url'],
+                'size': uploaded['size'],
+                'bucket': uploaded['bucket_name'],
+            })
 
         if not uploaded_files:
             transaction.set_rollback(True)
             return Response({
                 'detail': 'No valid claim documents were provided'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        snapshot = _build_claim_snapshot(claim)
+        _log_claim_event(claim, 'submitted', 'Claim submitted', {'snapshot': snapshot})
+        _log_claim_event(claim, 'pending', 'Claim pending review', {'snapshot': snapshot})
         
         return Response({
             'message': 'Claim created successfully',
@@ -331,22 +612,7 @@ def reupload_claim_documents(request, claim_id):
     Re-upload/replace one or more documents for an existing claim.
     """
     try:
-        supabase_user_id = getattr(request, 'user_id', None)
-        email = getattr(request, 'email', None)
-
-        user = None
-        if supabase_user_id:
-            try:
-                from users.models import User
-                user = User.objects.get(supabase_user_id=supabase_user_id)
-            except User.DoesNotExist:
-                pass
-        if not user and email:
-            try:
-                from users.models import User
-                user = User.objects.get(email=email)
-            except User.DoesNotExist:
-                pass
+        user = _get_request_user(request)
         if not user:
             return Response({'detail': 'User not authenticated or not found'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -355,7 +621,7 @@ def reupload_claim_documents(request, claim_id):
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT claim_id
+                SELECT claim_id, status
                 FROM claims
                 WHERE claim_id = %s::uuid
                   AND user_id = %s::uuid
@@ -366,6 +632,7 @@ def reupload_claim_documents(request, claim_id):
             row = cursor.fetchone()
         if not row:
             return Response({'detail': 'Claim not found for this user'}, status=status.HTTP_404_NOT_FOUND)
+        current_claim_status = row[1]
 
         if not request.FILES:
             return Response({'detail': 'At least one document is required for reupload'}, status=status.HTTP_400_BAD_REQUEST)
@@ -402,12 +669,20 @@ def reupload_claim_documents(request, claim_id):
                 defaults={
                     'file_url': file_url,
                     'file_path': file_path,
+                    'uploaded_at': timezone.now(),
                     'review_status': 'pending',
                     'review_remarks': None,
                     'reviewed_at': None,
                     'reviewed_by': None,
                 }
             )
+
+            # Reupload replaces the source document, so previous extraction output
+            # for this claim + document type is no longer valid.
+            ClaimExtractedField.objects.filter(
+                claim_id=claim_uuid,
+                document_type=field_name,
+            ).delete()
 
             updated_docs.append({
                 'document_id': str(doc.document_id),
@@ -419,7 +694,29 @@ def reupload_claim_documents(request, claim_id):
         if not updated_docs:
             return Response({'detail': 'No valid reupload documents found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        current_claim_status = _recompute_claim_status(str(claim_uuid))
+        if current_claim_status == 'rejected':
+            Claim.objects.filter(claim_id=claim_uuid).update(updated_at=timezone.now())
+        else:
+            current_claim_status = _recompute_claim_status(str(claim_uuid))
+
+        claim = Claim.objects.filter(claim_id=claim_uuid).first()
+        if claim:
+            _log_claim_event(
+                claim,
+                'edited',
+                'Claim documents edited',
+                {
+                    'changesSummary': [
+                        {
+                            'field': f"document:{doc['document_type']}",
+                            'label': f"{doc['document_type']} replaced",
+                            'after': doc['filename'],
+                        }
+                        for doc in updated_docs
+                    ],
+                    'snapshot': _build_claim_snapshot(claim),
+                }
+            )
 
         return Response({
             'message': 'Documents reuploaded successfully',
@@ -441,7 +738,13 @@ def review_claim_document(request, claim_id, document_id):
     body: { "status": "approved|rejected|pending", "remarks": "..." }
     """
     try:
-        review_status = str(request.data.get('status', '')).lower()
+        requested_status = str(request.data.get('status', '')).lower()
+        review_status = requested_status
+        review_status = {
+            'verified': 'approved',
+            'issue': 'rejected',
+            'missing': 'pending',
+        }.get(review_status, review_status)
         remarks = request.data.get('remarks')
         if review_status not in {'approved', 'rejected', 'pending'}:
             return Response({'detail': 'status must be approved, rejected, or pending'}, status=status.HTTP_400_BAD_REQUEST)
@@ -455,6 +758,11 @@ def review_claim_document(request, claim_id, document_id):
         doc = ClaimDocument.objects.filter(document_id=document_id, claim_id=claim_id).first()
         if not doc:
             return Response({'detail': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
+        claim = Claim.objects.filter(claim_id=claim_id).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+        if claim.status not in {'pending', 'reapplied'}:
+            return Response({'detail': 'Finalized claims must be reopened before editing'}, status=status.HTTP_400_BAD_REQUEST)
 
         doc.review_status = review_status
         doc.review_remarks = remarks
@@ -468,10 +776,384 @@ def review_claim_document(request, claim_id, document_id):
             'claim_id': str(claim_id),
             'document_id': str(document_id),
             'review_status': doc.review_status,
+            'document_status': 'missing' if requested_status == 'missing' else _infer_document_status(doc.review_status, True),
             'review_remarks': doc.review_remarks,
             'claim_status': claim_status,
         }, status=status.HTTP_200_OK)
     except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PUT'])
+@permission_classes([IsSupabaseAuthenticated])
+@transaction.atomic
+def update_claim(request, claim_id):
+    try:
+        user = _get_request_user(request)
+        if not user:
+            return Response({'detail': 'User not authenticated or not found'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        claim_uuid = _uuid.UUID(str(claim_id))
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT claim_id
+                FROM claims
+                WHERE claim_id = %s::uuid
+                  AND user_id = %s::uuid
+                LIMIT 1
+                """,
+                [str(claim_uuid), str(user.supabase_user_id)],
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return Response({'detail': 'Claim not found for this user'}, status=status.HTTP_404_NOT_FOUND)
+        claim = Claim.objects.filter(claim_id=claim_uuid).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+        before_snapshot = _build_claim_snapshot(claim)
+
+        member_id = request.data.get('member_id')
+        total_amount = request.data.get('total_amount')
+
+        if member_id in (None, '') and total_amount in (None, ''):
+            return Response({'detail': 'Nothing to update'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if member_id not in (None, ''):
+            from .models import FamilyMember
+            member = FamilyMember.objects.filter(id=member_id, policy=claim.policy).first()
+            if not member:
+                return Response({'detail': 'Family member not found for this policy'}, status=status.HTTP_404_NOT_FOUND)
+            claim.member = member
+
+        if total_amount not in (None, ''):
+            try:
+                claim.total_amount = total_amount
+            except Exception:
+                return Response({'detail': 'Invalid total_amount'}, status=status.HTTP_400_BAD_REQUEST)
+
+        claim.updated_at = timezone.now()
+        claim.save(update_fields=['member', 'total_amount', 'updated_at'])
+        after_snapshot = _build_claim_snapshot(claim)
+        changes_summary = _compute_change_summary(before_snapshot, after_snapshot)
+        if changes_summary:
+            _log_claim_event(
+                claim,
+                'edited',
+                'Claim edited',
+                {
+                    'changesSummary': changes_summary,
+                    'snapshot': after_snapshot,
+                }
+            )
+
+        return Response({
+            'claim_id': str(claim.claim_id),
+            'status': claim.status,
+            'total_amount': float(claim.total_amount) if claim.total_amount is not None else None,
+            'member_id': claim.member_id,
+            'member_name': claim.member.name if claim.member else 'Policy holder',
+            'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        transaction.set_rollback(True)
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsSupabaseAuthenticated])
+@transaction.atomic
+def reapply_claim(request, claim_id):
+    try:
+        user = _get_request_user(request)
+        if not user:
+            return Response({'detail': 'User not authenticated or not found'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        claim_uuid = _uuid.UUID(str(claim_id))
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT claim_id
+                FROM claims
+                WHERE claim_id = %s::uuid
+                  AND user_id = %s::uuid
+                LIMIT 1
+                """,
+                [str(claim_uuid), str(user.supabase_user_id)],
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return Response({'detail': 'Claim not found for this user'}, status=status.HTTP_404_NOT_FOUND)
+        claim = Claim.objects.filter(claim_id=claim_uuid).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+        if claim.status == 'reapplied':
+            return Response({
+                'claim_id': str(claim.claim_id),
+                'status': claim.status,
+                'is_reapplied': bool(claim.is_reapplied),
+                'rejection_reason': claim.rejection_reason,
+                'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+                'message': 'Claim already reapplied',
+            }, status=status.HTTP_200_OK)
+        if claim.status != 'rejected':
+            return Response({'detail': 'Only rejected claims can be reapplied'}, status=status.HTTP_400_BAD_REQUEST)
+
+        latest_rejected_event = ClaimEvent.objects.filter(
+            claim_id=claim.claim_id,
+            event_type='rejected'
+        ).order_by('-created_at', '-id').first()
+        current_snapshot = _build_claim_snapshot(claim)
+        previous_snapshot = (latest_rejected_event.metadata or {}).get('snapshot') if latest_rejected_event else None
+        changes_summary = _compute_change_summary(previous_snapshot, current_snapshot)
+
+        claim.status = 'reapplied'
+        claim.is_reapplied = True
+        claim.updated_at = timezone.now()
+        claim.save(update_fields=['status', 'is_reapplied', 'updated_at'])
+
+        ClaimDocument.objects.filter(claim=claim).update(
+            review_status='pending',
+            review_remarks=None,
+            reviewed_at=None,
+            reviewed_by=None,
+        )
+
+        _log_claim_event(
+            claim,
+            'reapplied',
+            'Claim reapplied',
+            {
+                'previousRejectionReason': claim.rejection_reason,
+                'changesSummary': changes_summary,
+                'snapshot': current_snapshot,
+            }
+        )
+        _log_claim_event(
+            claim,
+            'pending',
+            'Claim pending review',
+            {
+                'reapplied': True,
+                'snapshot': current_snapshot,
+            }
+        )
+
+        return Response({
+            'claim_id': str(claim.claim_id),
+            'status': claim.status,
+            'is_reapplied': claim.is_reapplied,
+            'rejection_reason': claim.rejection_reason,
+            'changesSummary': changes_summary,
+            'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        transaction.set_rollback(True)
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsSupabaseAuthenticated])
+@transaction.atomic
+def approve_claim(request, claim_id):
+    try:
+        admin_user = _get_admin_user(request)
+        if not admin_user:
+            return Response({'detail': 'Admin permission required'}, status=status.HTTP_403_FORBIDDEN)
+
+        claim = Claim.objects.select_for_update().select_related('policy').filter(claim_id=claim_id).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        policy = Policy.objects.select_for_update().filter(id=claim.policy_id).first()
+        if not policy:
+            return Response({'detail': 'Policy not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if claim.status == 'approved':
+            policy = _sync_policy_used_coverage(policy)
+            claim_amount = Decimal(claim.total_amount or 0)
+            return Response({
+                'claim_id': str(claim.claim_id),
+                'status': claim.status,
+                'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+                'message': 'Claim already approved',
+                'coverage_summary': {
+                    **_serialize_policy_coverage(policy),
+                    'requested_claim_amount': float(claim_amount),
+                    'exceeds_remaining_coverage': False,
+                },
+            }, status=status.HTTP_200_OK)
+        if claim.status not in {'pending', 'reapplied'}:
+            return Response({'detail': 'Finalized claims must be reopened before approval'}, status=status.HTTP_400_BAD_REQUEST)
+
+        claim_amount = Decimal(claim.total_amount or 0)
+        policy = _sync_policy_used_coverage(policy)
+        coverage_summary = _serialize_policy_coverage(policy)
+        remaining_coverage = Decimal(str(coverage_summary['remaining_coverage_amount']))
+        if claim_amount > remaining_coverage:
+            return Response({
+                'detail': 'Claim exceeds remaining coverage',
+                'coverage_summary': {
+                    **coverage_summary,
+                    'requested_claim_amount': float(claim_amount),
+                    'exceeds_remaining_coverage': True,
+                },
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        claim.status = 'approved'
+        claim.rejection_reason = None
+        claim.updated_at = timezone.now()
+        claim.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+
+        policy = _sync_policy_used_coverage(policy)
+
+        ClaimDocument.objects.filter(claim_id=claim.claim_id).update(
+            review_status='approved',
+            review_remarks=None,
+            reviewed_at=timezone.now(),
+            reviewed_by=admin_user.email,
+        )
+
+        _log_claim_event(
+            claim,
+            'approved',
+            'Claim approved',
+            {'snapshot': _build_claim_snapshot(claim)}
+        )
+
+        return Response({
+            'claim_id': str(claim.claim_id),
+            'status': claim.status,
+            'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+            'coverage_summary': {
+                **_serialize_policy_coverage(policy),
+                'requested_claim_amount': float(claim_amount),
+                'exceeds_remaining_coverage': False,
+            },
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        transaction.set_rollback(True)
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsSupabaseAuthenticated])
+@transaction.atomic
+def reject_claim(request, claim_id):
+    try:
+        admin_user = _get_admin_user(request)
+        if not admin_user:
+            return Response({'detail': 'Admin permission required'}, status=status.HTTP_403_FORBIDDEN)
+
+        rejection_reason = str(request.data.get('reason') or request.data.get('rejection_reason') or '').strip()
+        if not rejection_reason:
+            return Response({'detail': 'Rejection reason is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        claim = Claim.objects.filter(claim_id=claim_id).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+        if claim.status not in {'pending', 'reapplied'}:
+            return Response({'detail': 'Finalized claims must be reopened before rejection'}, status=status.HTTP_400_BAD_REQUEST)
+
+        claim.status = 'rejected'
+        claim.rejection_reason = rejection_reason
+        claim.updated_at = timezone.now()
+        claim.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+
+        ClaimDocument.objects.filter(claim_id=claim.claim_id).update(
+            review_status='rejected',
+            review_remarks=rejection_reason,
+            reviewed_at=timezone.now(),
+            reviewed_by=admin_user.email,
+        )
+
+        _log_claim_event(
+            claim,
+            'rejected',
+            'Claim rejected',
+            {
+                'reason': rejection_reason,
+                'snapshot': _build_claim_snapshot(claim),
+            }
+        )
+
+        return Response({
+            'claim_id': str(claim.claim_id),
+            'status': claim.status,
+            'rejection_reason': claim.rejection_reason,
+            'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        transaction.set_rollback(True)
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsSupabaseAuthenticated])
+@transaction.atomic
+def reopen_claim(request, claim_id):
+    try:
+        admin_user = _get_admin_user(request)
+        if not admin_user:
+            return Response({'detail': 'Admin permission required'}, status=status.HTTP_403_FORBIDDEN)
+
+        reopen_reason = str(request.data.get('reason') or request.data.get('reopen_reason') or '').strip()
+        if not reopen_reason:
+            return Response({'detail': 'Reason for reopening is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        claim = Claim.objects.select_for_update().select_related('policy').filter(claim_id=claim_id).first()
+        if not claim:
+            return Response({'detail': 'Claim not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if claim.status not in {'approved', 'rejected'}:
+            return Response({'detail': 'Only approved or rejected claims can be reopened'}, status=status.HTTP_400_BAD_REQUEST)
+
+        policy = Policy.objects.select_for_update().filter(id=claim.policy_id).first()
+        if not policy:
+            return Response({'detail': 'Policy not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        claim_amount = Decimal(claim.total_amount or 0)
+        previous_status = claim.status
+
+        claim.status = 'pending'
+        claim.is_reopened = True
+        claim.reopen_reason = reopen_reason
+        claim.reopened_at = timezone.now()
+        claim.updated_at = claim.reopened_at
+        claim.save(update_fields=['status', 'is_reopened', 'reopen_reason', 'reopened_at', 'updated_at'])
+
+        policy = _sync_policy_used_coverage(policy)
+
+        _log_claim_event(
+            claim,
+            'reopened',
+            'Claim reopened for correction',
+            {
+                'reason': reopen_reason,
+                'previousStatus': previous_status,
+                'snapshot': _build_claim_snapshot(claim),
+            }
+        )
+
+        return Response({
+            'claim_id': str(claim.claim_id),
+            'status': claim.status,
+            'is_reopened': claim.is_reopened,
+            'reopen_reason': claim.reopen_reason,
+            'reopened_at': claim.reopened_at.isoformat() if claim.reopened_at else None,
+            'updated_at': claim.updated_at.isoformat() if claim.updated_at else None,
+            'coverage_summary': {
+                **_serialize_policy_coverage(policy),
+                'requested_claim_amount': float(claim_amount),
+                'exceeds_remaining_coverage': False,
+            },
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        transaction.set_rollback(True)
         return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -509,7 +1191,7 @@ class ClaimViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['GET'])
-@permission_classes([])  # Temporarily remove authentication for testing
+@permission_classes([IsSupabaseAuthenticated])
 def admin_review_claim(request, claim_id):
     """
     Admin endpoint to review a claim and fetch all documents
@@ -524,6 +1206,12 @@ def admin_review_claim(request, claim_id):
                     c.user_id,
                     c.policy_id,
                     c.status,
+                    c.rejection_reason,
+                    c.is_reopened,
+                    c.reopen_reason,
+                    c.reopened_at,
+                    c.is_reapplied,
+                    c.updated_at,
                     c.created_at,
                     c.total_amount,
                     u.name,
@@ -542,8 +1230,10 @@ def admin_review_claim(request, claim_id):
             return Response({
                 'detail': f'Claim with ID {claim_id} not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        
-        claim_id, user_uuid, policy_id, claim_status, created_at, total_amount, name, full_name, email, policy_number = claim_row
+
+        claim_id, user_uuid, policy_id, claim_status, rejection_reason, is_reopened, reopen_reason, reopened_at, is_reapplied, updated_at, created_at, total_amount, name, full_name, email, policy_number = claim_row
+        claim_obj = Claim.objects.filter(claim_id=claim_id).select_related('member').first()
+        policy_obj = Policy.objects.filter(id=policy_id).first()
         
         # Get all documents for this claim
         with connection.cursor() as cursor:
@@ -590,6 +1280,7 @@ def admin_review_claim(request, claim_id):
                     'bucket_name': bucket_name
                     ,
                     'review_status': review_status or 'pending',
+                    'document_status': _infer_document_status(review_status or 'pending', True),
                     'review_remarks': review_remarks,
                     'reviewed_at': reviewed_at.isoformat() if reviewed_at else None,
                     'reviewed_by': reviewed_by,
@@ -603,16 +1294,41 @@ def admin_review_claim(request, claim_id):
         
         # Get user display name
         user_name = name or full_name or email or "Unknown User"
+        expected_document_types = _get_expected_document_types(claim_obj) if claim_obj else []
+        existing_document_types = {doc['document_type'] for doc in document_data}
+        for missing_document_type in expected_document_types:
+            if missing_document_type in existing_document_types:
+                continue
+            document_data.append({
+                'document_id': f'missing:{missing_document_type}',
+                'document_type': missing_document_type,
+                'signed_url': None,
+                'file_url': None,
+                'file_path': None,
+                'uploaded_at': None,
+                'upload_date': None,
+                'original_filename': None,
+                'bucket_name': _get_bucket_name_for_document_type(missing_document_type),
+                'review_status': 'pending',
+                'document_status': 'missing',
+                'review_remarks': 'Document not uploaded',
+                'reviewed_at': None,
+                'reviewed_by': None,
+                'is_missing': True,
+            })
         
         # Get ML extraction data (cached only, do not block review response)
         ml_extraction_data = {}
         try:
-            from .models_document import ClaimExtractedField
+            latest_uploads = _get_latest_document_upload_map(claim_id)
             cached_fields = ClaimExtractedField.objects.filter(claim_id=claim_id)
             if cached_fields.exists():
                 grouped_data = {}
                 for field in cached_fields:
                     doc_type = field.document_type
+                    latest_upload = latest_uploads.get(doc_type)
+                    if latest_upload and field.created_at and field.created_at < latest_upload:
+                        continue
                     if doc_type not in grouped_data:
                         grouped_data[doc_type] = []
                     grouped_data[doc_type].append({
@@ -638,20 +1354,68 @@ def admin_review_claim(request, claim_id):
                 'error': 'Failed to load cached extraction',
                 'details': str(e)
             }
-        
+
+        timeline = _serialize_timeline(claim_id)
+        reapplied_event = next((event for event in reversed(timeline) if event['eventType'] == 'reapplied'), None)
+
+        smart_assist = []
+        for doc in document_data:
+            if doc.get('document_status') == 'missing':
+                smart_assist.append({
+                    'type': 'missing_document',
+                    'label': f"Missing {doc['document_type']}",
+                })
+
+        extraction_documents = ml_extraction_data.get('documents', {}) if isinstance(ml_extraction_data, dict) else {}
+        for document_type, fields in extraction_documents.items():
+            for field in fields:
+                confidence = float(field.get('confidence') or 0)
+                if confidence < 0.8:
+                    smart_assist.append({
+                        'type': 'low_confidence',
+                        'label': f"Low confidence in {field.get('field_name')} from {document_type}",
+                        'confidence': confidence,
+                    })
+                if field.get('field_name') == 'total_amount' and total_amount is not None:
+                    extracted_amount = str(field.get('value') or '')
+                    normalized_extracted = ''.join(ch for ch in extracted_amount if ch.isdigit() or ch == '.')
+                    normalized_claim = str(total_amount)
+                    if normalized_extracted and normalized_claim and normalized_extracted != normalized_claim:
+                        smart_assist.append({
+                            'type': 'amount_mismatch',
+                            'label': f"Claim amount {normalized_claim} differs from extracted amount {normalized_extracted}",
+                        })
+                        break
+
         # Return basic claim and document data with ML extraction
         return Response({
             'claim_id': str(claim_id),
             'claim_status': claim_status,
+            'rejection_reason': rejection_reason,
+            'is_reopened': bool(is_reopened),
+            'reopen_reason': reopen_reason,
+            'reopened_at': reopened_at.isoformat() if reopened_at else None,
+            'is_reapplied': bool(is_reapplied or claim_status == 'reapplied'),
+            'updated_at': updated_at.isoformat() if updated_at else None,
             'total_amount': str(total_amount) if total_amount is not None else '0',
             'created_at': created_at.isoformat() if created_at else None,
             'user_name': user_name,
             'user_email': email,
             'policy_id': str(policy_id),
             'policy_number': policy_number,
+            'coverage_summary': {
+                **(_serialize_policy_coverage(policy_obj) if policy_obj else {'total_coverage_amount': 0.0, 'used_coverage_amount': 0.0, 'remaining_coverage_amount': 0.0}),
+                'requested_claim_amount': float(total_amount) if total_amount is not None else 0.0,
+                'exceeds_remaining_coverage': bool(
+                    policy_obj and total_amount is not None and Decimal(total_amount) > max(Decimal(policy_obj.total_coverage_amount or 0) - Decimal(policy_obj.used_coverage_amount or 0), Decimal('0'))
+                ),
+            },
             'documents': document_data,
             'document_count': len(document_data),
-            'ml_extraction': ml_extraction_data
+            'ml_extraction': ml_extraction_data,
+            'timeline': timeline,
+            'changes_summary': (reapplied_event or {}).get('metadata', {}).get('changesSummary', []),
+            'smart_assist': smart_assist,
         }, status=status.HTTP_200_OK)
             
     except Exception as e:
@@ -694,7 +1458,9 @@ def download_claim_document(request, claim_id, document_id):
             content_type=file_response.headers.get('Content-Type', 'application/octet-stream')
         )
         response['Content-Disposition'] = f'inline; filename="{file_name}"'
-        response['Cache-Control'] = 'private, max-age=3600'
+        response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response['Pragma'] = 'no-cache'
+        response['Expires'] = '0'
         return response
     except ClaimDocument.DoesNotExist:
         return Response({'error': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -735,8 +1501,8 @@ def _get_document_signed_url(file_url: str, document_type: str) -> str:
             parts = file_url.split('/', 1)
             if len(parts) == 2:
                 return get_public_url(parts[0], parts[1])
-        except:
-            pass
+        except Exception as fallback_error:
+            logger.warning(f"Fallback URL generation failed: {str(fallback_error)}")
         raise
 
 
@@ -759,38 +1525,3 @@ def _get_bucket_name_for_document_type(document_type: str) -> str:
     return bucket_mapping.get(document_type, 'policies')
 
 
-def _get_sample_ml_data():
-    """
-    Return sample ML extraction data for demonstration
-    Shows structure that KYC pipeline and hospital/pharmacy extractors would return
-    """
-    return {
-        'hospital_bill': [
-            {'field_name': 'patient_name', 'value': 'Real User from Database', 'confidence': 0.97},
-            {'field_name': 'hospital_name', 'value': 'Apollo Hospital', 'confidence': 0.95},
-            {'field_name': 'treatment_date', 'value': '2024-01-10', 'confidence': 0.98},
-            {'field_name': 'total_amount', 'value': '₹18,500', 'confidence': 0.96},
-            {'field_name': 'doctor_name', 'value': 'Dr. Sharma', 'confidence': 0.94},
-            {'field_name': 'diagnosis', 'value': 'Fever, Cough', 'confidence': 0.93}
-        ],
-        'pharmacy_bills': [
-            {'field_name': 'patient_name', 'value': 'Real User from Database', 'confidence': 0.96},
-            {'field_name': 'pharmacy_name', 'value': 'MedPlus', 'confidence': 0.94},
-            {'field_name': 'prescription_date', 'value': '2024-01-12', 'confidence': 0.97},
-            {'field_name': 'total_amount', 'value': '₹6,500', 'confidence': 0.98},
-            {'field_name': 'medicines', 'value': 'Paracetamol, Cough Syrup', 'confidence': 0.92}
-        ],
-        'aadhaar': [
-            {'field_name': 'name', 'value': 'Real User from Database', 'confidence': 0.99},
-            {'field_name': 'aadhaar_number', 'value': 'XXXX-XXXX-8742', 'confidence': 0.98},
-            {'field_name': 'date_of_birth', 'value': '15/08/1985', 'confidence': 0.97},
-            {'field_name': 'address', 'value': '123 MG Road, Bangalore', 'confidence': 0.95},
-            {'field_name': 'gender', 'value': 'Male', 'confidence': 0.99}
-        ],
-        'pan': [
-            {'field_name': 'name', 'value': 'Real User from Database', 'confidence': 0.98},
-            {'field_name': 'pan_number', 'value': 'ABCPK1234M', 'confidence': 0.97},
-            {'field_name': 'fathers_name', 'value': 'Suresh Kumar', 'confidence': 0.96},
-            {'field_name': 'date_of_birth', 'value': '15/08/1985', 'confidence': 0.95}
-        ]
-    }

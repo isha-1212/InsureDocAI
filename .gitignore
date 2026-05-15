@@ -1,12 +1,7 @@
 # ==================== MediClaim System .gitignore ====================
 
 # ======================== EXCLUDE ML FOLDER ========================
-ML/
-*.ml
-*.model
-*.pkl
-*.h5
-*.onnx
+
 
 # ======================== PYTHON/DJANGO BACKEND ========================
 # Python
@@ -136,9 +131,10 @@ pids/
 *.seed
 *.pid.lock
 
-# Docker
-*.tar
-docker-compose.override.yml
+# Backup files
+*.bak
+*.backup
+*.old
 
 # Backup files
 *.bak

@@ -100,7 +100,7 @@ export function useUpdatePolicyStatus() {
   const { toast } = useToast();
 
   return useMutation({
-    mutationFn: async ({ id, status, rejectionReason }: { id: number, status: 'approved' | 'rejected', rejectionReason?: string }) => {
+    mutationFn: async ({ id, status, rejectionReason, totalCoverageAmount }: { id: number, status: 'approved' | 'rejected' | 'under_review', rejectionReason?: string, totalCoverageAmount?: number }) => {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
 
@@ -113,7 +113,7 @@ export function useUpdatePolicyStatus() {
           ...(token ? { 'Authorization': `Bearer ${token}` } : {})
         },
         // Backend expects snake_case field "rejection_reason"
-        body: JSON.stringify({ status, rejection_reason: rejectionReason }),
+        body: JSON.stringify({ status, rejection_reason: rejectionReason, total_coverage_amount: totalCoverageAmount }),
         credentials: "include",
       });
       if (!res.ok) {
@@ -136,6 +136,46 @@ export function useUpdatePolicyStatus() {
       queryClient.invalidateQueries({ queryKey: ['user-policy'] });
       queryClient.invalidateQueries({ queryKey: ['policy-detail'] });
       toast({ title: "Status Updated", description: "Policy status has been changed successfully." });
+    },
+  });
+}
+
+export function useReopenPolicy() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async ({ id, reason }: { id: number; reason?: string }) => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
+      const url = api.policies.reopen.path.replace(":id", String(id));
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ reason }),
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(
+          (errBody as any).error ||
+          (errBody as any).detail ||
+          "Failed to reopen policy"
+        );
+      }
+
+      return api.policies.reopen.responses[200].parse(await res.json());
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['all-policies'] });
+      queryClient.invalidateQueries({ queryKey: ['user-policy'] });
+      queryClient.invalidateQueries({ queryKey: ['policy-detail'] });
+      toast({ title: "Policy Reopened", description: "The policy is back under review and can be edited again." });
     },
   });
 }

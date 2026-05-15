@@ -68,11 +68,6 @@ class SupabaseAuthMiddleware(MiddlewareMixin):
             traceback.print_exc()
             print("========================================\n")
 
-            # In debug mode, crash so we can see it
-            if settings.DEBUG:
-                raise
-
-            # In production, just treat as unauthenticated
             return None
 
         return None

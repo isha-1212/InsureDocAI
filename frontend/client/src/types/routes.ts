@@ -19,6 +19,7 @@ export const api: any = {
         getByUser: { path: `${API_BASE}/policies/my_policy/`, responses: { 200: { parse: (x: any) => x } } },
         list: { path: `${API_BASE}/policies/`, responses: { 200: { parse: (x: any) => x } } },
         updateStatus: { path: `${API_BASE}/policies/:id/update_status/`, responses: { 200: { parse: (x: any) => x } } },
+        reopen: { path: `${API_BASE}/policies/:id/reopen/`, responses: { 200: { parse: (x: any) => x } } },
         pending: { path: `${API_BASE}/policies/pending/`, responses: { 200: { parse: (x: any) => x } } },
         allFamilies: { path: `${API_BASE}/policies/all_families/`, responses: { 200: { parse: (x: any) => x } } },
     },

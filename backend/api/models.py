@@ -5,15 +5,16 @@ from users.models import User
 
 # Import models from separate files
 from .models_document import PolicyDocument, ClaimDocument, ClaimExtractedField
-from .models_claim import Claim
+from .models_claim import Claim, ClaimEvent
 
-__all__ = ['Policy', 'FamilyMember', 'PolicyDocument', 'Claim', 'ClaimDocument', 'ClaimExtractedField']
+__all__ = ['Policy', 'PolicyEvent', 'FamilyMember', 'PolicyDocument', 'Claim', 'ClaimEvent', 'ClaimDocument', 'ClaimExtractedField']
 
 
 class Policy(models.Model):
     
     STATUS_CHOICES = [
-        ('pending', 'Pending Review'),
+        ('pending', 'Pending'),
+        ('under_review', 'Under Review'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
@@ -50,6 +51,20 @@ class Policy(models.Model):
         null=True,
         help_text="Admin provides reason if policy is rejected"
     )
+    total_coverage_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Total coverage shared across the policy"
+    )
+    used_coverage_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Coverage already consumed by approved claims"
+    )
     
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
@@ -66,6 +81,18 @@ class Policy(models.Model):
     
     def __str__(self):
         return f"{self.policy_number} - {self.user.email}"
+
+    @property
+    def is_editable(self):
+        return self.status in {'pending', 'under_review'}
+
+    @property
+    def workflow_label(self):
+        if self.status == 'pending':
+            return 'Pending Verification'
+        if self.status == 'under_review':
+            return 'Under Review'
+        return dict(self.STATUS_CHOICES).get(self.status, self.status)
     
     @property
     def is_active(self):
@@ -87,6 +114,44 @@ class Policy(models.Model):
     def get_family_members_count(self):
         """Get count of family members under this policy"""
         return self.family_members.count()
+
+    @property
+    def remaining_coverage_amount(self):
+        total = self.total_coverage_amount or 0
+        used = self.used_coverage_amount or 0
+        return max(total - used, 0)
+
+
+class PolicyEvent(models.Model):
+    EVENT_CHOICES = [
+        ('submitted', 'Submitted'),
+        ('updated', 'Updated'),
+        ('approved', 'Approved'),
+        ('reopened', 'Reopened'),
+        ('rejected', 'Rejected'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    policy = models.ForeignKey(
+        Policy,
+        on_delete=models.CASCADE,
+        related_name='timeline_events'
+    )
+    event_type = models.CharField(
+        max_length=20,
+        choices=EVENT_CHOICES,
+        db_index=True
+    )
+    event_label = models.CharField(max_length=100)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'policy_events'
+        ordering = ['created_at', 'id']
+
+    def __str__(self):
+        return f"{self.policy_id} - {self.event_type}"
 
 
 class FamilyMember(models.Model):

@@ -21,7 +21,6 @@ import AuthTest from "@/pages/AuthTest";
 import NotFound from "@/pages/not-found";
 import { useEffect } from "react";
 
-// Protected Route Component
 function ProtectedRoute({
   component: Component,
   allowedRole
@@ -29,19 +28,24 @@ function ProtectedRoute({
   component: React.ComponentType,
   allowedRole?: 'user' | 'admin'
 }) {
-  const { userId, role } = useAuth();
+  const { session, role, isLoading } = useAuth();
   const [_, setLocation] = useLocation();
 
   useEffect(() => {
-    if (!userId) {
-      setLocation("/");
-    } else if (allowedRole && role !== allowedRole) {
-      // Redirect to correct dashboard if trying to access wrong role page
+    if (isLoading) return;
+
+    if (!session) {
+      setLocation("/login");
+      return;
+    }
+
+    if (allowedRole && role !== allowedRole) {
       setLocation(role === 'admin' ? '/admin' : '/portal');
     }
-  }, [userId, role, setLocation, allowedRole]);
+  }, [session, role, isLoading, setLocation, allowedRole]);
 
-  if (!userId) return null;
+  if (isLoading) return null;
+  if (!session) return null;
   if (allowedRole && role !== allowedRole) return null;
 
   return <Component />;
@@ -54,10 +58,8 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/signup" component={SignUp} />
 
-      {/* Auth Test Page */}
       <Route path="/auth-test" component={AuthTest} />
 
-      {/* User Portal Routes */}
       <Route path="/portal">
         {() => <ProtectedRoute component={UserDashboard} allowedRole="user" />}
       </Route>
@@ -71,7 +73,6 @@ function Router() {
         {() => <ProtectedRoute component={NewClaim} allowedRole="user" />}
       </Route>
 
-      {/* Admin Portal Routes */}
       <Route path="/admin">
         {() => <ProtectedRoute component={AdminDashboard} allowedRole="admin" />}
       </Route>

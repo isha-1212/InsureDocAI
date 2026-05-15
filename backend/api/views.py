@@ -2,10 +2,10 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from django.db.models import Q
+from django.db import transaction
 import logging
 
-from .models import Policy, FamilyMember
+from .models import Policy, PolicyEvent, FamilyMember
 from users.models import User
 from auth_service.permissions import IsUser
 from .serializers import (
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 def get_authenticated_user(request):
     supabase_user_id = getattr(request, "user_id", None)
     email = getattr(request, "email", None)
+    role = getattr(request, "role", "user") or "user"
 
     if supabase_user_id:
         try:
@@ -39,14 +40,34 @@ def get_authenticated_user(request):
     if email:
         try:
             user = User.objects.get(email=email)
+            update_fields = []
             if supabase_user_id and not user.supabase_user_id:
                 user.supabase_user_id = supabase_user_id
-                user.save(update_fields=["supabase_user_id"])
+                update_fields.append("supabase_user_id")
+            if role == "admin" and user.role != "admin":
+                user.role = "admin"
+                update_fields.append("role")
+            if update_fields:
+                user.save(update_fields=update_fields)
             return user
         except User.DoesNotExist:
-            return None
+            if supabase_user_id:
+                return User.objects.create(
+                    supabase_user_id=supabase_user_id,
+                    email=email,
+                    role=role,
+                )
 
     return None
+
+
+def _log_policy_event(policy, event_type, event_label, metadata=None):
+    PolicyEvent.objects.create(
+        policy=policy,
+        event_type=event_type,
+        event_label=event_label,
+        metadata=metadata or {},
+    )
 
 
 # =========================
@@ -67,11 +88,11 @@ class PolicyViewSet(viewsets.ModelViewSet):
         if user.is_admin:
             return Policy.objects.select_related(
                 "user"
-            ).prefetch_related("family_members")
+            ).prefetch_related("family_members", "timeline_events")
 
         return Policy.objects.filter(
             user=user
-        ).select_related("user").prefetch_related("family_members")
+        ).select_related("user").prefetch_related("family_members", "timeline_events")
 
     # =========================
 
@@ -144,6 +165,15 @@ class PolicyViewSet(viewsets.ModelViewSet):
         if serializer.is_valid():
 
             policy = serializer.save(user=user)
+            _log_policy_event(
+                policy,
+                "submitted",
+                "Policy submitted for verification",
+                {
+                    "status": policy.status,
+                    "workflow_label": policy.workflow_label,
+                },
+            )
 
             return Response(
                 PolicySerializer(policy).data,
@@ -159,9 +189,9 @@ class PolicyViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset()
         policy = get_object_or_404(queryset, pk=pk)
 
-        if policy.status == "approved":
+        if not policy.is_editable:
             return Response(
-                {"error": "Cannot update approved policy"},
+                {"error": f"Policy is locked while status is '{policy.status}'. Reopen it before editing."},
                 status=400
             )
 
@@ -174,6 +204,15 @@ class PolicyViewSet(viewsets.ModelViewSet):
         if serializer.is_valid():
 
             serializer.save()
+            _log_policy_event(
+                policy,
+                "updated",
+                "Policy details updated",
+                {
+                    "updated_fields": sorted(serializer.validated_data.keys()),
+                    "status": policy.status,
+                },
+            )
 
             return Response(
                 PolicySerializer(policy).data
@@ -232,7 +271,7 @@ class PolicyViewSet(viewsets.ModelViewSet):
         policy = Policy.objects.select_related(
             "user"
         ).prefetch_related(
-            "family_members"
+            "family_members", "timeline_events"
         ).filter(
             user=user
         ).first()
@@ -264,6 +303,7 @@ class PolicyViewSet(viewsets.ModelViewSet):
     # =========================
 
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def update_status(self, request, pk=None):
 
         user = get_authenticated_user(request)
@@ -275,7 +315,10 @@ class PolicyViewSet(viewsets.ModelViewSet):
                 status=403
             )
 
-        policy = get_object_or_404(Policy, pk=pk)
+        policy = get_object_or_404(
+            Policy.objects.select_for_update().prefetch_related("timeline_events"),
+            pk=pk
+        )
 
         serializer = PolicyStatusUpdateSerializer(
             policy,
@@ -285,13 +328,82 @@ class PolicyViewSet(viewsets.ModelViewSet):
 
         if serializer.is_valid():
 
+            previous_status = policy.status
             serializer.save()
+            if policy.status == "approved":
+                _log_policy_event(
+                    policy,
+                    "approved",
+                    "Policy approved",
+                    {
+                        "from_status": previous_status,
+                        "total_coverage_amount": float(policy.total_coverage_amount or 0),
+                    },
+                )
+            elif policy.status == "rejected":
+                _log_policy_event(
+                    policy,
+                    "rejected",
+                    "Policy rejected",
+                    {
+                        "from_status": previous_status,
+                        "reason": policy.rejection_reason,
+                    },
+                )
+            elif policy.status == "under_review":
+                _log_policy_event(
+                    policy,
+                    "updated",
+                    "Policy moved back under review",
+                    {
+                        "from_status": previous_status,
+                    },
+                )
 
             return Response(
                 PolicySerializer(policy).data
             )
 
         return Response(serializer.errors, status=400)
+
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def reopen(self, request, pk=None):
+
+        user = get_authenticated_user(request)
+
+        if not user or not user.is_admin:
+            return Response(
+                {"error": "Admin access required"},
+                status=403
+            )
+
+        policy = get_object_or_404(Policy.objects.select_for_update(), pk=pk)
+
+        if policy.status != "approved":
+            return Response(
+                {"error": "Only approved policies can be reopened"},
+                status=400
+            )
+
+        reopen_reason = str(
+            request.data.get("reason") or request.data.get("reopen_reason") or ""
+        ).strip()
+
+        policy.status = "under_review"
+        policy.save(update_fields=["status", "updated_at"])
+
+        _log_policy_event(
+            policy,
+            "reopened",
+            "Policy reopened for correction",
+            {
+                "reason": reopen_reason,
+                "from_status": "approved",
+            },
+        )
+
+        return Response(PolicySerializer(policy).data)
 
     # =========================
 
@@ -308,8 +420,8 @@ class PolicyViewSet(viewsets.ModelViewSet):
             )
 
         policies = Policy.objects.filter(
-            status="pending"
-        ).select_related("user").prefetch_related("family_members")
+            status__in=["pending", "under_review"]
+        ).select_related("user").prefetch_related("family_members", "timeline_events")
 
         serializer = PolicyListSerializer(policies, many=True)
 
@@ -391,11 +503,27 @@ class FamilyMemberViewSet(viewsets.ModelViewSet):
                 status=400
             )
 
+        # Only allow adding family members after admin has approved the policy
+        if policy.status != 'approved':
+            return Response(
+                {"error": "Policy must be approved by admin before adding family members."},
+                status=400
+            )
+
         serializer = FamilyMemberCreateSerializer(data=request.data)
 
         if serializer.is_valid():
 
             member = serializer.save(policy=policy)
+            _log_policy_event(
+                policy,
+                "updated",
+                "Family member added",
+                {
+                    "member_id": member.id,
+                    "member_name": member.name,
+                },
+            )
 
             return Response(
                 FamilyMemberSerializer(member).data,
@@ -411,6 +539,12 @@ class FamilyMemberViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset()
         member = get_object_or_404(queryset, pk=pk)
 
+        if not member.policy.is_editable:
+            return Response(
+                {"error": f"Policy is locked while status is '{member.policy.status}'. Reopen it before editing members."},
+                status=400
+            )
+
         serializer = FamilyMemberCreateSerializer(
             member,
             data=request.data,
@@ -420,6 +554,15 @@ class FamilyMemberViewSet(viewsets.ModelViewSet):
         if serializer.is_valid():
 
             serializer.save()
+            _log_policy_event(
+                member.policy,
+                "updated",
+                "Family member updated",
+                {
+                    "member_id": member.id,
+                    "updated_fields": sorted(serializer.validated_data.keys()),
+                },
+            )
 
             return Response(
                 FamilyMemberSerializer(member).data
@@ -434,7 +577,35 @@ class FamilyMemberViewSet(viewsets.ModelViewSet):
         queryset = self.get_queryset()
         member = get_object_or_404(queryset, pk=pk)
 
+        if not member.policy.is_editable:
+            return Response(
+                {"error": f"Policy is locked while status is '{member.policy.status}'. Reopen it before editing members."},
+                status=400
+            )
+
+        # Check if member has any associated claims
+        claims_count = member.claims.count()
+        if claims_count > 0:
+            return Response(
+                {
+                    "error": "This family member is associated with existing claims and cannot be deleted.",
+                    "details": f"Found {claims_count} claim(s) linked to this member."
+                },
+                status=400
+            )
+
+        member_name = member.name
+        policy = member.policy
+
         member.delete()
+        _log_policy_event(
+            policy,
+            "updated",
+            "Family member removed",
+            {
+                "member_name": member_name,
+            },
+        )
 
         return Response(
             {"message": "Family member deleted"},

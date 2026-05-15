@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export { insertPolicySchema } from '@/lib/policy-validation';
 
 export interface InsertPolicy {
     policy_number: string;
@@ -10,8 +11,19 @@ export interface InsertPolicy {
 export interface Policy extends InsertPolicy {
     id: number;
     user_id: number;
-    status: 'pending' | 'approved' | 'rejected';
+    status: 'pending' | 'under_review' | 'approved' | 'rejected';
+    workflow_label?: string;
+    is_editable?: boolean;
     rejection_reason?: string;
+    total_coverage_amount?: number | string;
+    used_coverage_amount?: number | string;
+    remaining_coverage_amount?: number | string;
+    timeline?: Array<{
+        eventType: string;
+        label: string;
+        timestamp?: string;
+        metadata?: Record<string, unknown>;
+    }>;
     created_at: string;
     updated_at: string;
 }
@@ -33,13 +45,6 @@ export interface FamilyMember extends InsertFamilyMember {
 export interface CreateClaimRequest {
     [key: string]: any;
 }
-
-export const insertPolicySchema = z.object({
-    policy_number: z.string().min(1, "Policy number is required"),
-    start_date: z.string().min(1, "Start date is required"),
-    end_date: z.string().min(1, "End date is required"),
-    policy_document_url: z.string().optional(),
-});
 
 export const insertFamilyMemberSchema = z.object({
     policy: z.number(),

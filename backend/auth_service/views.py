@@ -1,7 +1,7 @@
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
-from .permissions import IsAuthenticated, IsAdmin, require_auth, require_admin
+from .permissions import IsAuthenticated, IsAdmin
 from .supabase_client import get_supabase
 
 

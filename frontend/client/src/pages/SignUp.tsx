@@ -87,6 +87,11 @@ export default function SignUp() {
             }
         } catch (error: any) {
             console.log('Signup error:', error);
+            const exactError = [
+                error?.message,
+                error?.code ? `code=${error.code}` : null,
+                typeof error?.status === 'number' ? `status=${error.status}` : null,
+            ].filter(Boolean).join(' | ');
 
             // Check if user already exists
             if (error.name === 'UserExistsError' ||
@@ -96,14 +101,14 @@ export default function SignUp() {
                 error.status === 422) {
                 toast({
                     title: "User already exists",
-                    description: "An account with this email already exists. Redirecting to sign in...",
+                    description: exactError || "An account with this email already exists. Redirecting to sign in...",
                     variant: "destructive",
                 });
                 setTimeout(() => setLocation("/login"), 2000);
             } else {
                 toast({
                     title: "Sign up failed",
-                    description: error.message || "An error occurred during sign up. Please try again.",
+                    description: exactError || "An error occurred during sign up. Please try again.",
                     variant: "destructive",
                 });
             }
@@ -113,31 +118,31 @@ export default function SignUp() {
     }
 
     return (
-        <div className="min-h-screen lg:h-screen w-full flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden">
+        <div className="min-h-screen lg:h-screen w-full flex flex-col lg:flex-row overflow-x-hidden lg:overflow-hidden">
             {/* Left Panel - Animated Background */}
             <AnimatedBackground />
 
             {/* Right Panel - Auth Form */}
-            <div className="w-full lg:w-[60%] bg-[#FDFBF7] flex items-center justify-center p-5 sm:p-6 md:p-8 lg:p-12 relative overflow-hidden">
+            <div className="w-full lg:w-[60%] bg-[#FDFBF7] flex items-center justify-center px-5 py-5 sm:px-6 sm:py-6 md:px-8 md:py-7 lg:px-7 lg:py-4 relative overflow-hidden">
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ type: "spring", stiffness: 300, damping: 30 }}
-                    className="w-full max-w-xl my-auto py-5 sm:py-8"
+                    className="w-full max-w-md my-auto py-1 sm:py-3 lg:py-0"
                 >
                     {/* Header */}
-                    <div className="mb-6 sm:mb-8">
-                        <h1 className="text-4xl sm:text-5xl md:text-6xl font-serif font-bold tracking-tight text-[#111827] mb-3">
+                    <div className="mb-3 sm:mb-4">
+                        <h1 className="text-4xl sm:text-[3.6rem] lg:text-[3.25rem] font-serif font-bold tracking-tight text-[#111827] mb-1.5">
                             Create Account
                         </h1>
-                        <p className="text-base sm:text-lg text-[#6B7280] leading-relaxed">
-                            Join MediClaim AI for intelligent claim processing
+                        <p className="text-[0.98rem] lg:text-base text-[#6B7280] leading-relaxed">
+                            Join InsureDoc AI for intelligent claim processing
                         </p>
                     </div>
 
                     {/* Form */}
                     <Form {...form}>
-                        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5">
+                        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-3">
                             {/* Role Selection */}
                             <motion.div
                                 initial={{ opacity: 0, y: 20 }}
@@ -148,15 +153,15 @@ export default function SignUp() {
                                     control={form.control}
                                     name="role"
                                     render={({ field }) => (
-                                        <FormItem className="space-y-3">
-                                            <FormLabel className="text-sm font-medium text-[#6B7280] mb-1.5 block">
+                                        <FormItem className="space-y-2">
+                                            <FormLabel className="text-[0.92rem] font-medium text-[#6B7280] mb-1 block">
                                                 Select Role
                                             </FormLabel>
                                             <FormControl>
                                                 <RadioGroup
                                                     onValueChange={field.onChange}
                                                     value={field.value}
-                                                    className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+                                                    className="grid grid-cols-1 sm:grid-cols-2 gap-2.5"
                                                 >
                                                     <FormItem className="relative">
                                                         <FormControl>
@@ -164,10 +169,10 @@ export default function SignUp() {
                                                         </FormControl>
                                                         <Label
                                                             htmlFor="role-user"
-                                                            className="flex flex-col items-center justify-center rounded-2xl border-2 border-[#E5E7EB] bg-white p-6 hover:border-blue-500/30 hover:bg-blue-50 peer-data-[state=checked]:border-blue-500 peer-data-[state=checked]:bg-blue-50 cursor-pointer transition-all"
+                                                            className="flex min-h-[76px] flex-col items-center justify-center rounded-2xl border-2 border-[#E5E7EB] bg-white p-3 hover:border-blue-500/30 hover:bg-blue-50 peer-data-[state=checked]:border-blue-500 peer-data-[state=checked]:bg-blue-50 cursor-pointer transition-all"
                                                         >
-                                                            <User className="mb-2 h-7 w-7 text-[#6B7280] peer-data-[state=checked]:text-blue-500" />
-                                                            <span className="font-semibold text-[#111827]">Policy Holder</span>
+                                                            <User className="mb-1 h-5 w-5 text-[#6B7280] peer-data-[state=checked]:text-blue-500" />
+                                                            <span className="text-[0.92rem] font-semibold text-[#111827]">Policy Holder</span>
                                                         </Label>
                                                     </FormItem>
                                                     <FormItem className="relative">
@@ -176,10 +181,10 @@ export default function SignUp() {
                                                         </FormControl>
                                                         <Label
                                                             htmlFor="role-admin"
-                                                            className="flex flex-col items-center justify-center rounded-2xl border-2 border-[#E5E7EB] bg-white p-6 hover:border-blue-500/30 hover:bg-blue-50 peer-data-[state=checked]:border-blue-500 peer-data-[state=checked]:bg-blue-50 cursor-pointer transition-all"
+                                                            className="flex min-h-[76px] flex-col items-center justify-center rounded-2xl border-2 border-[#E5E7EB] bg-white p-3 hover:border-blue-500/30 hover:bg-blue-50 peer-data-[state=checked]:border-blue-500 peer-data-[state=checked]:bg-blue-50 cursor-pointer transition-all"
                                                         >
-                                                            <ShieldCheck className="mb-2 h-7 w-7 text-[#6B7280] peer-data-[state=checked]:text-blue-500" />
-                                                            <span className="font-semibold text-[#111827]">Administrator</span>
+                                                            <ShieldCheck className="mb-1 h-5 w-5 text-[#6B7280] peer-data-[state=checked]:text-blue-500" />
+                                                            <span className="text-[0.92rem] font-semibold text-[#111827]">Administrator</span>
                                                         </Label>
                                                     </FormItem>
                                                 </RadioGroup>
@@ -201,19 +206,19 @@ export default function SignUp() {
                                     name="fullName"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-sm font-medium text-[#6B7280] mb-1.5 block">
+                                            <FormLabel className="text-[0.92rem] font-medium text-[#6B7280] mb-1 block">
                                                 Full Name
                                             </FormLabel>
                                             <FormControl>
                                                 <div className="relative">
-                                                    <User className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                                                        <Input
-                                                            type="text"
-                                                            placeholder="John Doe"
-                                                            {...field}
-                                                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                                                            autoComplete="name"
-                                                        />
+                                                    <User className="absolute left-0 top-3 h-4 w-4 text-[#6B7280]" />
+                                                    <Input
+                                                        type="text"
+                                                        placeholder="John Doe"
+                                                        {...field}
+                                                        className="h-10 text-[0.95rem] bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-7 rounded-none transition-colors"
+                                                        autoComplete="name"
+                                                    />
                                                 </div>
                                             </FormControl>
                                             <FormMessage />
@@ -233,19 +238,19 @@ export default function SignUp() {
                                     name="email"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-sm font-medium text-[#6B7280] mb-1.5 block">
+                                            <FormLabel className="text-[0.92rem] font-medium text-[#6B7280] mb-1 block">
                                                 Email Address
                                             </FormLabel>
                                             <FormControl>
                                                 <div className="relative">
-                                                    <Mail className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                                                        <Input
-                                                            type="email"
-                                                            placeholder="you@company.com"
-                                                            {...field}
-                                                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                                                            autoComplete="email"
-                                                        />
+                                                    <Mail className="absolute left-0 top-3 h-4 w-4 text-[#6B7280]" />
+                                                    <Input
+                                                        type="email"
+                                                        placeholder="you@company.com"
+                                                        {...field}
+                                                        className="h-10 text-[0.95rem] bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-7 rounded-none transition-colors"
+                                                        autoComplete="email"
+                                                    />
                                                 </div>
                                             </FormControl>
                                             <FormMessage />
@@ -265,19 +270,19 @@ export default function SignUp() {
                                     name="password"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-sm font-medium text-[#6B7280] mb-1.5 block">
+                                            <FormLabel className="text-[0.92rem] font-medium text-[#6B7280] mb-1 block">
                                                 Password
                                             </FormLabel>
                                             <FormControl>
                                                 <div className="relative">
-                                                    <Lock className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                                                        <Input
-                                                            type="password"
-                                                            placeholder="Min 6 characters"
-                                                            {...field}
-                                                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                                                            autoComplete="new-password"
-                                                        />
+                                                    <Lock className="absolute left-0 top-3 h-4 w-4 text-[#6B7280]" />
+                                                    <Input
+                                                        type="password"
+                                                        placeholder="Min 6 characters"
+                                                        {...field}
+                                                        className="h-10 text-[0.95rem] bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-7 rounded-none transition-colors"
+                                                        autoComplete="new-password"
+                                                    />
                                                 </div>
                                             </FormControl>
                                             <FormMessage />
@@ -297,19 +302,19 @@ export default function SignUp() {
                                     name="confirmPassword"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel className="text-sm font-medium text-[#6B7280] mb-1.5 block">
+                                            <FormLabel className="text-[0.92rem] font-medium text-[#6B7280] mb-1 block">
                                                 Confirm Password
                                             </FormLabel>
                                             <FormControl>
                                                 <div className="relative">
-                                                    <Lock className="absolute left-0 top-3 h-5 w-5 text-[#6B7280]" />
-                                                        <Input
-                                                            type="password"
-                                                            placeholder="Confirm your password"
-                                                            {...field}
-                                                            className="h-14 text-base bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-8 rounded-none transition-colors"
-                                                            autoComplete="new-password"
-                                                        />
+                                                    <Lock className="absolute left-0 top-3 h-4 w-4 text-[#6B7280]" />
+                                                    <Input
+                                                        type="password"
+                                                        placeholder="Confirm your password"
+                                                        {...field}
+                                                        className="h-10 text-[0.95rem] bg-transparent border-0 border-b-2 border-gray-200 focus-visible:ring-0 focus-visible:border-blue-500 pl-7 rounded-none transition-colors"
+                                                        autoComplete="new-password"
+                                                    />
                                                 </div>
                                             </FormControl>
                                             <FormMessage />
@@ -325,7 +330,7 @@ export default function SignUp() {
                             >
                                 <Button
                                     type="submit"
-                                    className="w-full h-14 rounded-full px-10 text-base font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5 active:translate-y-0 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 mt-2"
+                                    className="w-full h-10 rounded-full px-8 text-[0.95rem] font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:-translate-y-0.5 active:translate-y-0 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 mt-0.5"
                                     disabled={isPending}
                                 >
                                     {isPending ? (
@@ -346,9 +351,9 @@ export default function SignUp() {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         transition={{ delay: 0.7, duration: 0.5 }}
-                        className="mt-6 text-center"
+                        className="mt-2.5 text-center"
                     >
-                        <p className="text-base text-[#6B7280]">
+                        <p className="text-[0.92rem] text-[#6B7280]">
                             Already have an account?{" "}
                             <button
                                 onClick={() => setLocation("/login")}
@@ -360,7 +365,7 @@ export default function SignUp() {
                     </motion.div>
 
                     {/* Security Badge */}
-                    <div className="mt-8 pt-6 border-t border-[#E5E7EB]">
+                    <div className="mt-3 pt-2.5 border-t border-[#E5E7EB]">
                         <div className="flex items-center justify-center gap-2 text-xs text-[#6B7280]">
                             <Lock className="w-3 h-3" />
                             <span className="font-mono tracking-wide">256-bit SSL Encrypted</span>

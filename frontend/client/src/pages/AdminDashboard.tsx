@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { motion, useAnimation } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   FileText,
   Users,
@@ -29,7 +29,6 @@ import {
 } from "lucide-react";
 
 import { Layout } from "@/components/Layout";
-import { StatCard } from "@/components/StatCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,7 +37,7 @@ import { supabase } from "@/lib/supabase";
 
 type InsightCard = {
   total_documents_processed: number;
-  total_users: number;
+  total_policy_upload_users: number;
   total_claims: number;
 };
 
@@ -55,6 +54,12 @@ type InsightsPayload = {
   document_distribution: TypeMetric[];
   cards: InsightCard;
   avg_confidence_by_type: TypeMetric[];
+  pending_metrics?: {
+    pending_policies: number;
+    pending_claims: number;
+    documents_for_review: number;
+    breakdown: Array<{ name: string; value: number }>;
+  };
   cross_document_matching?: {
     matched: number;
     mismatched: number;
@@ -71,14 +76,6 @@ type OverviewPayload = {
 
 const API_BASE = `${import.meta.env.VITE_API_URL || "http://localhost:8000"}/api`;
 const COLORS = ["#0EA5E9", "#06B6D4", "#3B82F6", "#0284C7", "#0891B2", "#2563EB"];
-const GRADIENT_COLORS = [
-  "from-blue-500 to-cyan-500",
-  "from-cyan-500 to-blue-500",
-  "from-blue-600 to-cyan-600",
-  "from-cyan-600 to-blue-600",
-  "from-blue-400 to-cyan-400",
-  "from-cyan-400 to-blue-400"
-];
 
 const REQUIRED_TYPES = ["hospital_bill", "pharmacy_bill", "aadhaar", "pan"];
 
@@ -199,7 +196,7 @@ export default function AdminDashboard() {
 
   const cards = insights?.cards || {
     total_documents_processed: 0,
-    total_users: 0,
+    total_policy_upload_users: 0,
     total_claims: 0,
   };
 
@@ -241,13 +238,24 @@ export default function AdminDashboard() {
     ],
   };
 
+  const pendingMetrics = insights?.pending_metrics || {
+    pending_policies: 0,
+    pending_claims: 0,
+    documents_for_review: 0,
+    breakdown: [
+      { name: "Pending Policies", value: 0 },
+      { name: "Pending Claims", value: 0 },
+      { name: "Documents for Review", value: 0 },
+    ],
+  };
+
   return (
     <Layout scrollable={true}>
       <motion.div
         initial="hidden"
         animate="visible"
         variants={containerVariants}
-        className="flex flex-col space-y-8"
+        className="flex flex-col space-y-4"
       >
         {/* Header Section - Enhanced */}
         <motion.div
@@ -331,7 +339,7 @@ export default function AdminDashboard() {
           <motion.div variants={itemVariants} className="space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {Array.from({ length: 3 }).map((_, i) => (
-                <Card key={i} className="bg-gradient-to-br from-slate-900/80 via-slate-800/50 to-slate-900/80 border border-slate-700/50 backdrop-blur-xl shadow-2xl p-6">
+                <Card key={`skeleton-stat-${i}`} className="bg-gradient-to-br from-slate-900/80 via-slate-800/50 to-slate-900/80 border border-slate-700/50 backdrop-blur-xl shadow-2xl p-6">
                   <div className="flex items-center justify-between">
                     <div className="space-y-3 flex-1">
                       <Skeleton className="h-3 w-32 bg-slate-700/50 rounded-full" />
@@ -345,7 +353,7 @@ export default function AdminDashboard() {
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {Array.from({ length: 4 }).map((_, i) => (
-                <Card key={i} className="bg-gradient-to-br from-slate-900/80 via-slate-800/50 to-slate-900/80 border border-slate-700/50 backdrop-blur-xl shadow-2xl p-6">
+                <Card key={`skeleton-chart-${i}`} className="bg-gradient-to-br from-slate-900/80 via-slate-800/50 to-slate-900/80 border border-slate-700/50 backdrop-blur-xl shadow-2xl p-6">
                   <Skeleton className="h-6 w-48 mb-6 bg-slate-700/50 rounded-lg" />
                   <Skeleton className="h-64 w-full bg-slate-700/30 rounded-xl" />
                 </Card>
@@ -358,7 +366,7 @@ export default function AdminDashboard() {
         {!loading && !error && insights && (
           <>
             {/* Stats Cards - Completely Redesigned */}
-            <motion.div variants={itemVariants} className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <motion.div variants={itemVariants} className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {/* Card 1: Documents Processed */}
               <motion.div
                 initial={{ opacity: 0, y: 30 }}
@@ -374,42 +382,42 @@ export default function AdminDashboard() {
                   {/* Subtle pattern overlay */}
                   <div className="absolute inset-0 opacity-[0.02]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 relative z-10">
-                    <CardTitle className="text-sm font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
+                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 relative z-10">
+                    <CardTitle className="text-xs font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
                       Documents Processed
                     </CardTitle>
                     <motion.div
-                      className="p-3 rounded-2xl bg-gradient-to-br from-blue-500 to-cyan-500 shadow-lg shadow-blue-500/30 group-hover:shadow-blue-500/50 transition-shadow"
+                      className="p-2 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500 shadow-lg shadow-blue-500/30 group-hover:shadow-blue-500/50 transition-shadow"
                       whileHover={{ scale: 1.1, rotate: 5 }}
                       whileTap={{ scale: 0.95 }}
                     >
-                      <FileText className="w-5 h-5 text-white" />
+                      <FileText className="w-4 h-4 text-white" />
                     </motion.div>
                   </CardHeader>
-                  <CardContent className="relative z-10 space-y-3">
+                  <CardContent className="relative z-10 space-y-2">
                     <motion.div
-                      className="text-5xl font-bold bg-gradient-to-r from-white to-blue-100 bg-clip-text text-transparent"
+                      className="text-3xl font-bold bg-gradient-to-r from-white to-blue-100 bg-clip-text text-transparent"
                       initial={{ scale: 0.5, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       transition={{ delay: 0.3, type: "spring" }}
                     >
                       {cards.total_documents_processed.toLocaleString()}
                     </motion.div>
-                    <div className="flex items-center gap-2.5">
-                      <Badge className="bg-blue-500/20 text-blue-300 border border-blue-500/40 px-3 py-1 rounded-full font-semibold hover:bg-blue-500/30 transition-colors">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-blue-500/20 text-blue-300 border border-blue-500/40 px-2 py-0.5 text-[10px] rounded-full font-semibold hover:bg-blue-500/30 transition-colors">
                         +12.5%
                       </Badge>
-                      <span className="text-xs text-slate-500 font-medium">vs last month</span>
+                      <span className="text-[10px] text-slate-500 font-medium">vs last month</span>
                     </div>
-                    <div className="pt-2 flex items-center gap-1.5 text-xs text-slate-500">
-                      <TrendingUp className="w-3.5 h-3.5 text-blue-400" />
+                    <div className="pt-1 flex items-center gap-1 text-[10px] text-slate-500">
+                      <TrendingUp className="w-3 h-3 text-blue-400" />
                       <span>Trending upward</span>
                     </div>
                   </CardContent>
                 </Card>
               </motion.div>
 
-              {/* Card 2: Total Users */}
+              {/* Card 2: Policy Upload Users */}
               <motion.div
                 initial={{ opacity: 0, y: 30 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -421,35 +429,35 @@ export default function AdminDashboard() {
                   <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-transparent to-blue-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                   <div className="absolute inset-0 opacity-[0.02]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 relative z-10">
-                    <CardTitle className="text-sm font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
-                      Total Users
+                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 relative z-10">
+                    <CardTitle className="text-xs font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
+                      Policy Upload Users
                     </CardTitle>
                     <motion.div
-                      className="p-3 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-500 shadow-lg shadow-cyan-500/30 group-hover:shadow-cyan-500/50 transition-shadow"
+                      className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-500 shadow-lg shadow-cyan-500/30 group-hover:shadow-cyan-500/50 transition-shadow"
                       whileHover={{ scale: 1.1, rotate: -5 }}
                       whileTap={{ scale: 0.95 }}
                     >
-                      <Users className="w-5 h-5 text-white" />
+                      <Users className="w-4 h-4 text-white" />
                     </motion.div>
                   </CardHeader>
-                  <CardContent className="relative z-10 space-y-3">
+                  <CardContent className="relative z-10 space-y-2">
                     <motion.div
-                      className="text-5xl font-bold bg-gradient-to-r from-white to-cyan-100 bg-clip-text text-transparent"
+                      className="text-3xl font-bold bg-gradient-to-r from-white to-cyan-100 bg-clip-text text-transparent"
                       initial={{ scale: 0.5, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       transition={{ delay: 0.4, type: "spring" }}
                     >
-                      {cards.total_users.toLocaleString()}
+                      {cards.total_policy_upload_users.toLocaleString()}
                     </motion.div>
-                    <div className="flex items-center gap-2.5">
-                      <Badge className="bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-3 py-1 rounded-full font-semibold hover:bg-cyan-500/30 transition-colors">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-2 py-0.5 text-[10px] rounded-full font-semibold hover:bg-cyan-500/30 transition-colors">
                         +8.2%
                       </Badge>
-                      <span className="text-xs text-slate-500 font-medium">vs last month</span>
+                      <span className="text-[10px] text-slate-500 font-medium">vs last month</span>
                     </div>
-                    <div className="pt-2 flex items-center gap-1.5 text-xs text-slate-500">
-                      <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                    <div className="pt-1 flex items-center gap-1 text-[10px] text-slate-500">
+                      <Activity className="w-3 h-3 text-cyan-400" />
                       <span>Active growth</span>
                     </div>
                   </CardContent>
@@ -468,35 +476,35 @@ export default function AdminDashboard() {
                   <div className="absolute inset-0 bg-gradient-to-br from-blue-600/10 via-transparent to-cyan-600/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                   <div className="absolute inset-0 opacity-[0.02]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 relative z-10">
-                    <CardTitle className="text-sm font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
+                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 relative z-10">
+                    <CardTitle className="text-xs font-semibold text-slate-400 group-hover:text-slate-300 transition-colors tracking-wide uppercase">
                       Total Claims
                     </CardTitle>
                     <motion.div
-                      className="p-3 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-600 shadow-lg shadow-blue-600/30 group-hover:shadow-blue-600/50 transition-shadow"
+                      className="p-2 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-500 shadow-lg shadow-emerald-500/30 group-hover:shadow-emerald-500/50 transition-shadow"
                       whileHover={{ scale: 1.1, rotate: 5 }}
                       whileTap={{ scale: 0.95 }}
                     >
-                      <ClipboardCheck className="w-5 h-5 text-white" />
+                      <ClipboardCheck className="w-4 h-4 text-white" />
                     </motion.div>
                   </CardHeader>
-                  <CardContent className="relative z-10 space-y-3">
+                  <CardContent className="relative z-10 space-y-2">
                     <motion.div
-                      className="text-5xl font-bold bg-gradient-to-r from-white to-blue-100 bg-clip-text text-transparent"
+                      className="text-3xl font-bold bg-gradient-to-r from-white to-blue-100 bg-clip-text text-transparent"
                       initial={{ scale: 0.5, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       transition={{ delay: 0.5, type: "spring" }}
                     >
                       {cards.total_claims.toLocaleString()}
                     </motion.div>
-                    <div className="flex items-center gap-2.5">
-                      <Badge className="bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-3 py-1 rounded-full font-semibold hover:bg-cyan-500/30 transition-colors">
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-2 py-0.5 text-[10px] rounded-full font-semibold hover:bg-cyan-500/30 transition-colors">
                         +15.3%
                       </Badge>
-                      <span className="text-xs text-slate-500 font-medium">vs last month</span>
+                      <span className="text-[10px] text-slate-500 font-medium">vs last month</span>
                     </div>
-                    <div className="pt-2 flex items-center gap-1.5 text-xs text-slate-500">
-                      <Target className="w-3.5 h-3.5 text-blue-400" />
+                    <div className="pt-1 flex items-center gap-1 text-[10px] text-slate-500">
+                      <Target className="w-3 h-3 text-blue-400" />
                       <span>On target</span>
                     </div>
                   </CardContent>
@@ -505,7 +513,7 @@ export default function AdminDashboard() {
             </motion.div>
 
             {/* Charts Grid - Modernized */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
               {/* Documents Per Day Chart - Enhanced */}
               <motion.div variants={itemVariants} whileHover="hover" className="h-full">
                 <motion.div variants={cardHoverVariants} className="h-full">
@@ -513,7 +521,7 @@ export default function AdminDashboard() {
                     <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                     <div className="absolute inset-0 opacity-[0.015]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                    <CardHeader className="pb-4 relative z-10 shrink-0">
+                            <CardHeader className="pb-2 relative z-10 shrink-0">
                       <div className="flex items-center gap-3">
                         <motion.div
                           className="p-2.5 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-lg shadow-blue-500/30"
@@ -521,13 +529,13 @@ export default function AdminDashboard() {
                         >
                           <TrendingUp className="h-5 w-5 text-white" />
                         </motion.div>
-                        <CardTitle className="text-xl font-bold text-white group-hover:text-blue-100 transition-colors">
+                        <CardTitle className="text-lg font-bold text-white group-hover:text-blue-100 transition-colors">
                           Documents Per Day
                         </CardTitle>
                       </div>
                     </CardHeader>
-                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-6">
-                      <div className="h-64 w-full -mx-2">
+                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-3">
+                      <div className="h-48 w-full -mx-2">
                         <ResponsiveContainer width="100%" height="100%">
                           <LineChart data={insights?.documents_per_day || []}>
                             <defs>
@@ -589,29 +597,29 @@ export default function AdminDashboard() {
                     <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                     <div className="absolute inset-0 opacity-[0.015]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                    <CardHeader className="pb-4 relative z-10 shrink-0">
+                    <CardHeader className="pb-2 relative z-10 shrink-0">
                       <div className="flex items-center gap-3">
                         <motion.div
-                          className="p-2.5 bg-gradient-to-br from-cyan-500 to-blue-500 rounded-xl shadow-lg shadow-cyan-500/30"
+                          className="p-2.5 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl shadow-lg shadow-amber-500/30"
                           whileHover={{ scale: 1.1, rotate: -10 }}
                         >
-                          <PieChartIcon className="h-5 w-5 text-white" />
+                          <BarChart3 className="h-5 w-5 text-white" />
                         </motion.div>
-                        <CardTitle className="text-xl font-bold text-white group-hover:text-cyan-100 transition-colors">
+                        <CardTitle className="text-lg font-bold text-white group-hover:text-amber-100 transition-colors">
                           Distribution By Type
                         </CardTitle>
                       </div>
                     </CardHeader>
-                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-6">
-                      <div className="h-64 w-full">
+                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-3">
+                      <div className="h-48 w-full">
                         <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
                             <Pie
                               data={byType}
                               dataKey="count"
                               nameKey="label"
-                              outerRadius={85}
-                              innerRadius={45}
+                              outerRadius={75}
+                              innerRadius={35}
                               paddingAngle={3}
                               label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
                               labelLine={false}
@@ -656,21 +664,21 @@ export default function AdminDashboard() {
                     <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-transparent to-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                     <div className="absolute inset-0 opacity-[0.015]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                    <CardHeader className="pb-4 relative z-10 shrink-0">
+                    <CardHeader className="pb-2 relative z-10 shrink-0">
                       <div className="flex items-center gap-3">
                         <motion.div
-                          className="p-2.5 bg-gradient-to-br from-blue-600 to-cyan-600 rounded-xl shadow-lg shadow-blue-600/30"
-                          whileHover={{ scale: 1.1, rotate: 10 }}
+                          className="p-2.5 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl shadow-lg shadow-amber-500/30"
+                          whileHover={{ scale: 1.1, rotate: -10 }}
                         >
                           <BarChart3 className="h-5 w-5 text-white" />
                         </motion.div>
-                        <CardTitle className="text-xl font-bold text-white group-hover:text-blue-100 transition-colors">
+                        <CardTitle className="text-lg font-bold text-white group-hover:text-amber-100 transition-colors">
                           ML Confidence By Type
                         </CardTitle>
                       </div>
                     </CardHeader>
-                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-6">
-                      <div className="h-64 w-full -mx-2">
+                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-3">
+                      <div className="h-48 w-full">
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={confidenceByType}>
                             <defs>
@@ -723,90 +731,74 @@ export default function AdminDashboard() {
                 </motion.div>
               </motion.div>
 
-              {/* Cross-Document Matching - Enhanced */}
+              {/* Pending Metrics Bar Chart - Main Chart */}
               <motion.div variants={itemVariants} whileHover="hover" className="h-full">
                 <motion.div variants={cardHoverVariants} className="h-full">
                   <Card className="group h-full flex flex-col bg-gradient-to-br from-slate-900/95 via-slate-800/90 to-slate-900/95 border border-slate-700/60 backdrop-blur-2xl shadow-2xl shadow-cyan-600/10 hover:shadow-cyan-600/15 transition-all duration-500 overflow-hidden">
                     <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 via-transparent to-blue-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                     <div className="absolute inset-0 opacity-[0.015]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }} />
 
-                    <CardHeader className="pb-4 relative z-10 shrink-0">
+                    <CardHeader className="pb-2 relative z-10 shrink-0">
                       <div className="flex items-center gap-3">
                         <motion.div
                           className="p-2.5 bg-gradient-to-br from-cyan-600 to-blue-600 rounded-xl shadow-lg shadow-cyan-600/30"
                           whileHover={{ scale: 1.1, rotate: -10 }}
                         >
-                          <Target className="h-5 w-5 text-white" />
+                          <BarChart3 className="h-5 w-5 text-white" />
                         </motion.div>
-                        <CardTitle className="text-xl font-bold text-white group-hover:text-cyan-100 transition-colors">
-                          Cross-Document Matching
+                        <CardTitle className="text-lg font-bold text-white group-hover:text-cyan-100 transition-colors">
+                          Pending Items
                         </CardTitle>
                       </div>
                     </CardHeader>
-                    <CardContent className="relative z-10 flex-1 flex flex-col justify-between pb-6">
-                      <div className="flex-1 flex items-center justify-center mb-4">
-                        <div className="h-48 w-full">
-                          <ResponsiveContainer width="100%" height="100%">
-                            <PieChart>
-                              <Pie
-                                data={crossDocumentMatching.breakdown}
-                                dataKey="count"
-                                nameKey="status"
-                                innerRadius={50}
-                                outerRadius={75}
-                                paddingAngle={4}
-                                stroke="#0f172a"
-                                strokeWidth={3}
-                                activeShape={{
-                                  stroke: '#38bdf8',
-                                  strokeWidth: 4,
-                                  filter: 'drop-shadow(0 0 6px rgba(56, 189, 248, 0.4))'
-                                }}
-                              >
-                                <Cell fill="#06B6D4" />
-                                <Cell fill="#F43F5E" />
-                              </Pie>
-                              <Tooltip
-                                content={<CustomTooltip />}
-                                contentStyle={{
-                                  backgroundColor: '#0f172a',
-                                  border: '1px solid #1e293b',
-                                  borderRadius: '12px',
-                                  boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)'
-                                }}
-                                cursor={false}
-                              />
-                            </PieChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-4 shrink-0">
-                        <motion.div
-                          className="rounded-2xl bg-gradient-to-br from-cyan-900/50 to-blue-900/50 p-5 text-center border border-cyan-500/30 backdrop-blur-sm shadow-lg shadow-cyan-500/10"
-                          whileHover={{ scale: 1.02 }}
-                        >
-                          <div className="flex items-center justify-center gap-2 mb-2">
-                            <div className="w-3 h-3 bg-cyan-400 rounded-full shadow-lg shadow-cyan-400/50"></div>
-                            <span className="text-sm font-bold text-cyan-200 uppercase tracking-wide">Matched</span>
-                          </div>
-                          <p className="text-3xl font-bold text-white mb-2">{crossDocumentMatching.match_rate}%</p>
-                          <Badge className="text-xs bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold">
-                            {crossDocumentMatching.matched} docs
-                          </Badge>
-                        </motion.div>
-                        <motion.div
-                          className="rounded-2xl bg-gradient-to-br from-rose-900/50 to-red-900/50 p-5 text-center border border-rose-500/30 backdrop-blur-sm shadow-lg shadow-rose-500/10"
-                          whileHover={{ scale: 1.02 }}
-                        >
-                          <div className="flex items-center justify-center gap-2 mb-2">
-                            <div className="w-3 h-3 bg-rose-400 rounded-full shadow-lg shadow-rose-400/50"></div>
-                            <span className="text-sm font-bold text-rose-200 uppercase tracking-wide">Mismatched</span>
-                          </div>
-                          <p className="text-3xl font-bold text-white mb-2">{crossDocumentMatching.mismatch_rate}%</p>
-                          <Badge className="text-xs bg-rose-500/20 text-rose-300 border border-rose-500/40 font-semibold">
-                            {crossDocumentMatching.mismatched} docs
-                          </Badge>
-                        </motion.div>
+                    <CardContent className="relative z-10 flex-1 flex items-center justify-center pb-3">
+                      <div className="h-56 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={pendingMetrics.breakdown}>
+                            <defs>
+                              <linearGradient id="colorGradient1" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#06B6D4" stopOpacity={1} />
+                                <stop offset="95%" stopColor="#0891B2" stopOpacity={0.8} />
+                              </linearGradient>
+                              <linearGradient id="colorGradient2" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#3B82F6" stopOpacity={1} />
+                                <stop offset="95%" stopColor="#1E40AF" stopOpacity={0.8} />
+                              </linearGradient>
+                              <linearGradient id="colorGradient3" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#10B981" stopOpacity={1} />
+                                <stop offset="95%" stopColor="#059669" stopOpacity={0.8} />
+                              </linearGradient>
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                            <XAxis 
+                              dataKey="name" 
+                              stroke="#94a3b8"
+                                tick={{ fontSize: 11, fill: "#cbd5e1" }}
+                                angle={-15}
+                                textAnchor="end"
+                                height={50}
+                            />
+                            <YAxis 
+                              stroke="#94a3b8"
+                              tick={{ fontSize: 12, fill: "#cbd5e1" }}
+                            />
+                            <Tooltip
+                              content={<CustomTooltip />}
+                              contentStyle={{
+                                backgroundColor: '#0f172a',
+                                border: '1px solid #1e293b',
+                                borderRadius: '12px',
+                                boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)'
+                              }}
+                              cursor={false}
+                            />
+                            <Bar dataKey="value" fill="url(#colorGradient1)" radius={[12, 12, 0, 0]} animationDuration={500}>
+                              <Cell fill="#06B6D4" />
+                              <Cell fill="#3B82F6" />
+                              <Cell fill="#10B981" />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
                       </div>
                     </CardContent>
                   </Card>

@@ -125,7 +125,7 @@ export function Sidebar({ isOpen, setIsOpen }: SidebarProps) {
             </div>
             <div>
               <h1 className="text-xl font-bold bg-gradient-to-r from-white to-slate-300 bg-clip-text text-transparent">
-                MediClaim
+                InsureDocAI
               </h1>
               <p className="text-xs text-slate-400">AI Powered</p>
             </div>

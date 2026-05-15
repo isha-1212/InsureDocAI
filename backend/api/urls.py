@@ -13,9 +13,21 @@ from .views_upload import (
     get_documents_for_member,
     get_parent_documents_for_minor
 )
-from .views_claim import create_claim, admin_review_claim, download_claim_document, reupload_claim_documents, review_claim_document
+from .views_claim import (
+    create_claim,
+    admin_review_claim,
+    download_claim_document,
+    reupload_claim_documents,
+    review_claim_document,
+    update_claim,
+    reapply_claim,
+    approve_claim,
+    reject_claim,
+    reopen_claim,
+)
 from .views_ml_extraction import ClaimExtractionAPIView, ClaimDocumentExtractionAPIView
-from .views_admin import get_claims_for_review, create_test_data, admin_overview, admin_recent
+
+from .views_admin import get_claims_for_review, create_test_data, admin_overview, admin_recent, validate_claim_fields
 
 app_name = 'api'
 
@@ -38,9 +50,14 @@ urlpatterns = [
     
     # Claims endpoints
     path('claims/', create_claim, name='create-claim'),
+    path('claims/<str:claim_id>/', update_claim, name='update-claim'),
+    path('claims/<str:claim_id>/reapply/', reapply_claim, name='reapply-claim'),
     path('claims/<str:claim_id>/reupload/', reupload_claim_documents, name='reupload-claim-documents'),
     path('admin/claims/', get_claims_for_review, name='get-claims-for-review'),
     path('admin/claims/create-test-data/', create_test_data, name='create-test-data'),
+    path('admin/claims/<str:claim_id>/approve/', approve_claim, name='approve-claim'),
+    path('admin/claims/<str:claim_id>/reject/', reject_claim, name='reject-claim'),
+    path('admin/claims/<str:claim_id>/reopen/', reopen_claim, name='reopen-claim'),
     path('admin/claims/<str:claim_id>/review/', admin_review_claim, name='admin-review-claim'),
     path('admin/claims/<str:claim_id>/documents/<str:document_id>/download/', download_claim_document, name='download-claim-document'),
     path('admin/claims/<str:claim_id>/documents/<str:document_id>/review/', review_claim_document, name='review-claim-document'),
@@ -48,6 +65,7 @@ urlpatterns = [
     # ML Extraction endpoint
     path('admin/claims/<str:claim_id>/extract/', ClaimExtractionAPIView.as_view(), name='claim-ml-extraction'),
     path('admin/claims/<str:claim_id>/documents/<str:document_id>/extract/', ClaimDocumentExtractionAPIView.as_view(), name='claim-document-ml-extraction'),
+    path('admin/claims/<str:claim_id>/validate/', validate_claim_fields, name='validate-claim-fields'),
     path('admin/overview/', admin_overview, name='admin-overview'),
     path('admin/recent/', admin_recent, name='admin-recent'),
     
