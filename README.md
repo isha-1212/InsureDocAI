@@ -67,7 +67,7 @@ AI-powered insurance claim processing platform with OCR-based document extractio
 
 ## 🤖 ML Pipeline
 
-'''text
+```text
 Document Upload
       ↓
 PaddleOCR
@@ -81,7 +81,7 @@ Field Extraction
 Confidence Scoring
       ↓
 Validation Engine
-'''
+```
 
 
 ## Related Repositories
