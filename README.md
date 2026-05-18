@@ -6,7 +6,7 @@ AI-powered insurance claim processing platform with OCR-based document extractio
 
 ## System Architecture 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/isha-1212/InsureDocAI/main/IMG_20260518_073508.jpg" width="900"/>
+  <img src="https://github.com/isha-1212/InsureDocAI/blob/main/assets/1779070819716.jpg" width="900"/>
 </p>
 
 
